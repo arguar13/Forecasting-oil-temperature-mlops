@@ -41,6 +41,7 @@ core_ml/artifacts*/
 # (passwords, access keys) en texto plano dentro del binario.
 tfplan
 *.tfplan
+destroyplan*
 
 # Ignorar archivos de registro de caídas
 crash.log
