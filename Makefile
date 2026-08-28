@@ -115,11 +115,29 @@ data-toy: ## Procesa el dataset toy (~1000 filas) para un ciclo E2E rápido
 data-raw: ## Procesa el dataset completo de producción
 	cd $(CORE_DIR) && poetry run python -m src.data_processing --dataset raw --output_dir artifacts
 
+# MLFLOW_TRACKING_URI por defecto: el MLflow del stack docker-compose
+# (Fase C, Postgres+LocalStack), NO el "file:./mlruns" que usa train.py/
+# quality_gate.py sin esta variable -- si no coincide con el que lee la API
+# (docker-compose.yml::api MLFLOW_TRACKING_URI=http://mlflow:5000), el
+# modelo recién promovido no aparece nunca y /ready se queda en 503.
+# Sobreescribible (CI usa el DNS interno del cluster).
+# PYTHONUTF8=1: contra un tracking server real (no "file:./mlruns"), mlflow
+# imprime "🏃 View run ... at: <url>" -- la consola de Windows usa cp1252 por
+# defecto y revienta con UnicodeEncodeError al codificar el emoji. No-op en
+# Linux/Mac (ya usan UTF-8).
+#
+# El cliente de mlflow sube artefactos DIRECTO a S3 (bypasea el tracking
+# server) -- sin estas credenciales/endpoint, boto3 usa el AWS real en vez
+# de LocalStack y falla con NoSuchBucket. Mismas credenciales fijas que
+# docker-compose.yml da al propio contenedor de mlflow (localhost en vez
+# del hostname de la red de Docker, porque este proceso corre en el host).
+LOCALSTACK_ENV := AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_DEFAULT_REGION=us-east-1 MLFLOW_S3_ENDPOINT_URL=http://localhost:4566
+
 train-toy: data-toy ## Entrena end-to-end sobre el dataset toy en segundos (smoke test, sin GPU)
-	cd $(CORE_DIR) && poetry run python -m src.train --dataset toy --artifact_dir artifacts_toy --epochs 2 --n_trials 1
+	cd $(CORE_DIR) && PYTHONUTF8=1 MLFLOW_TRACKING_URI=$${MLFLOW_TRACKING_URI:-http://localhost:5000} $(LOCALSTACK_ENV) poetry run python -m src.train --dataset toy --artifact_dir artifacts_toy --epochs 2 --n_trials 1
 
 quality-gate: ## Evalúa el quality gate y promueve a producción si corresponde
-	cd $(CORE_DIR) && poetry run python -m src.quality_gate
+	cd $(CORE_DIR) && PYTHONUTF8=1 MLFLOW_TRACKING_URI=$${MLFLOW_TRACKING_URI:-http://localhost:5000} $(LOCALSTACK_ENV) poetry run python -m src.quality_gate
 
 mlflow-ui: ## Levanta la UI local de MLflow sobre ./core_ml/mlruns (http://localhost:5000)
 	cd $(CORE_DIR) && poetry run mlflow ui --backend-store-uri ./mlruns

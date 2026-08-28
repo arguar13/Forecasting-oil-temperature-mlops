@@ -174,13 +174,18 @@ def log_and_register_model(
     """Loguea el modelo bundleado en el run activo y registra una nueva
     versión inmutable en el Model Registry de MLflow.
     """
+    # .as_posix(): en Windows, os.path.join produce "artifacts_toy\dlinear_model.pth".
+    # mlflow copia ese separador literal dentro del manifiesto portable del
+    # modelo (MLmodel), así que al servirlo luego en un contenedor Linux
+    # (la API) "\\" no separa nada y falla con FileNotFoundError buscando
+    # ".../artifacts\\dlinear_model.pth" en vez de ".../artifacts/dlinear_model.pth".
     model_info = mlflow_log_model(
         artifact_path="model",
         python_model=DLinearForecaster(),
         artifacts={
-            "model_state_dict": model_state_dict_path,
-            "scaler_X": scaler_x_path,
-            "scaler_y": scaler_y_path,
+            "model_state_dict": Path(model_state_dict_path).as_posix(),
+            "scaler_X": Path(scaler_x_path).as_posix(),
+            "scaler_y": Path(scaler_y_path).as_posix(),
         },
         model_config={"seq_len": seq_len, "n_features": n_features},
         registered_model_name=registered_model_name,
