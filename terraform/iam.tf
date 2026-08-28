@@ -212,6 +212,20 @@ resource "aws_iam_role_policy_attachment" "terraform_ci_power_user" {
   policy_arn = "arn:aws:iam::aws:policy/PowerUserAccess"
 }
 
+# PowerUserAccess deniega explícitamente TODO iam:* (lectura incluida) --
+# el refresh de `terraform plan` necesita leer CUALQUIER recurso IAM ya
+# trackeado en el state (roles, OIDC providers, policies) sin importar su
+# nombre, no solo los de prefijo "dlinear-*"/"${var.project_name}-*" de
+# abajo. Iterar acción-por-acción (GetRole, luego GetOpenIDConnectProvider,
+# luego...) cada vez que el plan pisaba un tipo de recurso nuevo era lento
+# y gastaba minutos de CI -- de solo lectura, sin riesgo de escalar
+# privilegios, así que se usa la managed policy estándar de AWS en vez de
+# reinventarla acción por acción.
+resource "aws_iam_role_policy_attachment" "terraform_ci_iam_read_only" {
+  role       = aws_iam_role.terraform_ci_role.name
+  policy_arn = "arn:aws:iam::aws:policy/IAMReadOnlyAccess"
+}
+
 resource "aws_iam_role_policy" "terraform_ci_iam_scoped" {
   name = "iam-manage-dlinear-roles-only"
   role = aws_iam_role.terraform_ci_role.id
