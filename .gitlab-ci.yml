@@ -31,7 +31,7 @@ stages:
 .aws-auth:
   id_tokens:
     GITLAB_OIDC_TOKEN:
-      aud: https://gitlab.com
+      aud: sts.amazonaws.com
   before_script:
     # Ninguna de las imágenes base que usan .aws-auth/.aws-auth-terraform
     # (docker:24.0.5, python:3.10, hashicorp/terraform:1.5.0) trae AWS CLI
@@ -71,7 +71,7 @@ stages:
 .aws-auth-terraform:
   id_tokens:
     GITLAB_OIDC_TOKEN:
-      aud: https://gitlab.com
+      aud: sts.amazonaws.com
   before_script:
     - |
       if ! command -v aws >/dev/null 2>&1; then

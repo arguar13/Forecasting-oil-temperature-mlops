@@ -52,8 +52,14 @@ data "tls_certificate" "gitlab" {
 }
 
 resource "aws_iam_openid_connect_provider" "gitlab" {
-  url             = "https://gitlab.com"
-  client_id_list  = ["https://gitlab.com"]
+  url = "https://gitlab.com"
+  # "sts.amazonaws.com", no "https://gitlab.com": el proveedor OIDC de
+  # gitlab.com es un recurso único por cuenta de AWS -- ya existe en esta
+  # cuenta, gestionado por otro proyecto (predictive-maintenance-mlops) con
+  # esta audiencia (la que AWS documenta como estándar para federación STS).
+  # Declararlo igual evita pelear por el recurso compartido en cada apply;
+  # .gitlab-ci.yml (id_tokens.aud) usa la misma audiencia.
+  client_id_list  = ["sts.amazonaws.com"]
   thumbprint_list = [data.tls_certificate.gitlab.certificates[0].sha1_fingerprint]
 }
 
@@ -81,7 +87,7 @@ resource "aws_iam_role" "gitlab_ci_role" {
         Action = "sts:AssumeRoleWithWebIdentity"
         Condition = {
           StringEquals = {
-            "gitlab.com:aud" = "https://gitlab.com"
+            "gitlab.com:aud" = "sts.amazonaws.com"
           }
           StringLike = {
             "gitlab.com:sub" = "project_path:${var.gitlab_project_path}:ref_type:branch:ref:main"
@@ -186,7 +192,7 @@ resource "aws_iam_role" "terraform_ci_role" {
         Action = "sts:AssumeRoleWithWebIdentity"
         Condition = {
           StringEquals = {
-            "gitlab.com:aud" = "https://gitlab.com"
+            "gitlab.com:aud" = "sts.amazonaws.com"
           }
           StringLike = {
             "gitlab.com:sub" = "project_path:${var.gitlab_project_path}:ref_type:branch:ref:main"
