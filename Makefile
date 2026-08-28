@@ -128,7 +128,13 @@ mlflow-ui: ## Levanta la UI local de MLflow sobre ./core_ml/mlruns (http://local
 # Entorno local completo (Fase 3): Postgres, LocalStack, Kafka, MLflow, API
 # ------------------------------------------------------------------------------
 up: ## Levanta el stack local completo (Postgres, LocalStack, Kafka, MLflow, API)
-	docker compose up -d --build --wait
+	# kafka-init es un job de una sola corrida (crea el topic y termina con
+	# exit 0) -- `--wait` sobre TODOS los servicios lo trata como fallo
+	# porque deja de estar "running". Se construye/levanta todo primero
+	# (kafka-init corre y termina como dependencia de kafka) y el --wait
+	# se acota a los servicios de larga vida.
+	docker compose up -d --build
+	docker compose up -d --wait postgres localstack kafka mlflow api
 
 down: ## Detiene y elimina el stack local (conserva los volúmenes de datos)
 	docker compose down
