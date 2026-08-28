@@ -12,8 +12,12 @@ module "eks" {
   # AGREGADO: Habilitar OIDC para IRSA (IAM Roles for Service Accounts)
   enable_irsa = true
 
+  # Nombre corto deliberado: el módulo EKS genera un IAM role name_prefix como
+  # "<clave>-eks-node-group-", limitado a 38 caracteres por la API de IAM --
+  # "dlinear_inference_nodes" lo excedía ("terraform plan" fallaba con
+  # "expected length of name_prefix to be in the range (1 - 38)").
   eks_managed_node_groups = {
-    dlinear_inference_nodes = {
+    inference = {
       min_size     = 2
       max_size     = 10
       desired_size = 3

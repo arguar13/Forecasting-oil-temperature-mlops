@@ -171,7 +171,10 @@ repos:
         # MSYS_NO_PATHCONV: en Git Bash para Windows, "/repo" se traduce
         # automáticamente a una ruta de Windows (ej. "C:/Program Files/Git/repo"),
         # rompiendo tanto el destino del volumen como --ignorefile. No-op en Linux/Mac.
-        entry: bash -c 'MSYS_NO_PATHCONV=1 docker run --rm -v "$(pwd)":/repo aquasec/trivy:latest fs --exit-code 1 --severity HIGH,CRITICAL --ignorefile /repo/.trivyignore /repo'
+        # tfstate: siempre contiene secretos en texto plano (es el diseño de
+        # Terraform) -- ya está en .gitignore y jamás se pushea; escanearlo
+        # aquí solo generaría ruido en cada corrida local tras un apply.
+        entry: bash -c 'MSYS_NO_PATHCONV=1 docker run --rm -v "$(pwd)":/repo aquasec/trivy:latest fs --exit-code 1 --severity HIGH,CRITICAL --ignorefile /repo/.trivyignore --skip-dirs "**/.terraform,**/mlruns,**/mlartifacts" --skip-files "**/*.tfstate,**/*.tfstate.*" /repo'
         language: system
         pass_filenames: false
         stages: [pre-push]

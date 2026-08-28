@@ -79,7 +79,9 @@ security:trivy:
     - docker:24.0.5-dind
   script:
     - docker run --rm -v "$CI_PROJECT_DIR":/repo aquasec/trivy:latest fs
-        --exit-code 1 --severity HIGH,CRITICAL --ignorefile /repo/.trivyignore /repo
+        --exit-code 1 --severity HIGH,CRITICAL --ignorefile /repo/.trivyignore
+        --skip-dirs "**/.terraform,**/mlruns,**/mlartifacts"
+        --skip-files "**/*.tfstate,**/*.tfstate.*" /repo
 
 # ========================
 # Fase 3: Testcontainers (Postgres/Kafka/LocalStack efímeros + docker-compose.yml)
