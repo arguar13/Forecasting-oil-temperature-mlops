@@ -94,7 +94,7 @@ secrets-baseline: ## Regenera .secrets.baseline tras auditar nuevos hallazgos
 trivy: ## Escanea dependencias, IaC y secretos con Trivy (requiere Docker)
 	MSYS_NO_PATHCONV=1 docker run --rm -v "$$(pwd)":/repo aquasec/trivy:latest fs \
 		--exit-code 1 --severity HIGH,CRITICAL --ignorefile /repo/.trivyignore \
-		--skip-dirs "**/.terraform,**/mlruns,**/mlartifacts" \
+		--skip-dirs "**/.terraform,**/mlruns,**/mlartifacts,**/.claude" \
 		--skip-files "**/*.tfstate,**/*.tfstate.*" /repo
 
 # ------------------------------------------------------------------------------

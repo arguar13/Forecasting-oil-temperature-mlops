@@ -174,7 +174,10 @@ repos:
         # tfstate: siempre contiene secretos en texto plano (es el diseño de
         # Terraform) -- ya está en .gitignore y jamás se pushea; escanearlo
         # aquí solo generaría ruido en cada corrida local tras un apply.
-        entry: bash -c 'MSYS_NO_PATHCONV=1 docker run --rm -v "$(pwd)":/repo aquasec/trivy:latest fs --exit-code 1 --severity HIGH,CRITICAL --ignorefile /repo/.trivyignore --skip-dirs "**/.terraform,**/mlruns,**/mlartifacts" --skip-files "**/*.tfstate,**/*.tfstate.*" /repo'
+        # .claude: estado interno del asistente (incluye locks activos, ej.
+        # scheduled_tasks.lock) -- trivy podía colgarse esperando el lock
+        # con "semaphore acquire: context deadline exceeded".
+        entry: bash -c 'MSYS_NO_PATHCONV=1 docker run --rm -v "$(pwd)":/repo aquasec/trivy:latest fs --exit-code 1 --severity HIGH,CRITICAL --ignorefile /repo/.trivyignore --skip-dirs "**/.terraform,**/mlruns,**/mlartifacts,**/.claude" --skip-files "**/*.tfstate,**/*.tfstate.*" /repo'
         language: system
         pass_filenames: false
         stages: [pre-push]
