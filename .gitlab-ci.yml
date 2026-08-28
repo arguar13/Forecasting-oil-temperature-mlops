@@ -34,7 +34,7 @@ stages:
       aud: sts.amazonaws.com
   before_script:
     # Ninguna de las imágenes base que usan .aws-auth/.aws-auth-terraform
-    # (docker:24.0.5, python:3.10, hashicorp/terraform:1.5.0) trae AWS CLI
+    # (docker:24.0.5, python:3.10, hashicorp/terraform:1.15.9) trae AWS CLI
     # preinstalado -- sin esto, el "aws sts assume-role-with-web-identity"
     # de abajo falla con "aws: not found" antes de que cualquier `apk add`
     # propio del job (ej. docker:build-push) llegue a correr, porque
@@ -47,7 +47,7 @@ stages:
           apt-get update -qq && apt-get install -y -qq awscli >/dev/null
         fi
       fi
-    # STS=(...) es sintaxis de array de bash -- hashicorp/terraform:1.5.0 y
+    # STS=(...) es sintaxis de array de bash -- hashicorp/terraform:1.15.9 y
     # docker:24.0.5 no traen bash (solo /bin/sh, dash/ash), donde falla con
     # "syntax error: unexpected (". awk sobre la salida --output text es
     # POSIX y funciona igual en bash, dash o ash.
@@ -103,7 +103,7 @@ stages:
 terraform:fmt:
   stage: validate
   image:
-    name: hashicorp/terraform:1.5.0
+    name: hashicorp/terraform:1.15.9
     entrypoint: [""]
   script:
     - cd $TF_ROOT
@@ -171,7 +171,7 @@ terraform:plan:
   stage: plan
   extends: .aws-auth-terraform
   image:
-    name: hashicorp/terraform:1.5.0
+    name: hashicorp/terraform:1.15.9
     entrypoint: [""]
   script:
     - cd $TF_ROOT
@@ -188,7 +188,7 @@ terraform:apply:
   stage: apply
   extends: .aws-auth-terraform
   image:
-    name: hashicorp/terraform:1.5.0
+    name: hashicorp/terraform:1.15.9
     entrypoint: [""]
   script:
     - cd $TF_ROOT
