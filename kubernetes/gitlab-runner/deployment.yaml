@@ -49,6 +49,12 @@ spec:
       # en un emptyDir efímero, nunca en un ConfigMap ni en Git) en un
       # volumen compartido con el contenedor principal.
       initContainers:
+        # Con un runner authentication token nuevo estilo (glrt-...), el
+        # tag list/locked/run-untagged/etc. viven en el server (se fijan al
+        # crear el runner vía API/UI, no aquí) -- pasarlos a `register`
+        # falla con "Runner configuration other than name and executor
+        # configuration is reserved". Solo la configuración del executor
+        # (--executor, --kubernetes-*) sigue yendo en el comando.
         - name: register
           image: gitlab/gitlab-runner:v16.11.2
           command:
@@ -64,8 +70,6 @@ spec:
                 --kubernetes-service-account "gitlab-runner" \
                 --kubernetes-image "python:3.10" \
                 --kubernetes-pod-labels "app=gitlab-runner-job" \
-                --tag-list "in-vpc" \
-                --run-untagged="false" \
                 --config /etc/gitlab-runner/config.toml
           env:
             - name: RUNNER_TOKEN

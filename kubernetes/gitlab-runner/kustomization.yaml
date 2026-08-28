@@ -4,6 +4,13 @@ kind: Kustomization
 # Tooling de plataforma, no parte de la app -- se aplica una sola vez de
 # forma imperativa (igual que el bootstrap de ArgoCD), no vía la Application
 # de GitOps que reconcilia kubernetes/overlays/production/.
+#
+# Sin este "namespace:", ni rbac.yaml ni deployment.yaml declaran uno propio
+# -- kubectl los crea en el namespace por defecto del contexto actual
+# ("default"), no en "gitlab-runner" (namespace.yaml sí lo crea, pero eso
+# no reubica a los demás recursos).
+namespace: gitlab-runner
+
 resources:
   - namespace.yaml
   - rbac.yaml

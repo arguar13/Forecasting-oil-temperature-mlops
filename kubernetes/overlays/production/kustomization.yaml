@@ -23,8 +23,8 @@ patches:
 configMapGenerator:
 - behavior: merge
   literals:
-  - MODEL_BUCKET_NAME=dlinear-forecast-cluster-model-artifacts-REPLACE_WITH_AWS_ACCOUNT_ID
-  - RDS_ENDPOINT=REPLACE_WITH_RDS_ENDPOINT
+  - MODEL_BUCKET_NAME=dlinear-forecast-cluster-model-artifacts-040175285118
+  - RDS_ENDPOINT=dlinear-forecast-cluster-backend-db.cctqc6mqgk83.us-east-1.rds.amazonaws.com:5432
   name: dlinear-config
 
 # El ÚNICO punto que cambia en cada despliegue. CI lo actualiza de forma
@@ -33,8 +33,8 @@ configMapGenerator:
 # cluster desde ese commit. Ver .gitlab-ci.yml::kubernetes:deploy.
 images:
 - name: dlinear-api
-  newName: REPLACE_WITH_AWS_ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/dlinear-forecast-api
+  newName: 040175285118.dkr.ecr.us-east-1.amazonaws.com/dlinear-forecast-api
   newTag: latest
 - name: mlflow-server
-  newName: REPLACE_WITH_AWS_ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/dlinear-mlflow-server
+  newName: 040175285118.dkr.ecr.us-east-1.amazonaws.com/dlinear-mlflow-server
   newTag: latest

@@ -24,7 +24,7 @@ spec:
   source:
     # Reemplazar por la URL real del repo (GitLab u otro remoto) al hacer
     # el bootstrap del entorno.
-    repoURL: https://gitlab.com/REPLACE_WITH_NAMESPACE/612-forecasting-oil-temperature-mlops.git
+    repoURL: https://gitlab.com/personal-group7745334/612-forecasting-oil-temperature-mlops.git
     targetRevision: main
     path: kubernetes/overlays/production
 
