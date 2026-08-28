@@ -1,0 +1,16 @@
+# Copia este archivo a `.dvc/config.local` (ya está en .gitignore, DVC lo
+# aplica automáticamente sobre `.dvc/config`) para apuntar el remoto S3 a
+# LocalStack (levantado por docker-compose) en vez del bucket real de AWS.
+#
+#   cp .dvc/config.local.example .dvc/config.local
+#
+# `url` se sobreescribe aquí porque el bucket de LocalStack es fijo
+# (mlops-portafolio-proj3-models, creado por
+# localstack/init/01-bootstrap.sh) y NO tiene por qué coincidir con el
+# bucket real que crea Terraform en AWS (ver `url` en .dvc/config) -- cada
+# entorno define su propio bucket sin tocar el remoto compartido.
+['remote "s3remote"']
+    url = s3://mlops-portafolio-proj3-models/dvc-store
+    endpointurl = http://localhost:4566
+    access_key_id = test
+    secret_access_key = test  # pragma: allowlist secret -- credencial fija de LocalStack, nunca se usa fuera de docker-compose

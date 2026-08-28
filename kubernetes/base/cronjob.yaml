@@ -1,0 +1,38 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: dlinear-batch-inference
+spec:
+  schedule: "0 2 * * *"  # Se ejecuta todos los días a las 2:00 AM UTC
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      # Backoff limit explícito: evita reintentos infinitos si el batch
+      # falla de forma persistente (p. ej. datos corruptos, contrato de
+      # datos violado) -- Kubernetes marca el Job como fallido tras 3
+      # intentos en vez de reintentar para siempre.
+      backoffLimit: 3
+      activeDeadlineSeconds: 1800  # 30 min máximo por corrida; evita jobs colgados indefinidamente
+      template:
+        metadata:
+          labels:
+            app: dlinear-batch
+        spec:
+          serviceAccountName: dlinear-sa  # Aprovecha el mismo IAM Role (IRSA) para acceder a S3
+          restartPolicy: OnFailure
+          containers:
+          - name: dlinear-batch-container
+            image: dlinear-api:base
+            command: ["python", "-m", "src.batch_inference"]
+            envFrom:
+            - configMapRef:
+                name: dlinear-config
+            resources:
+              requests:
+                memory: "512Mi"
+                cpu: "500m"
+              limits:
+                memory: "1Gi"
+                cpu: "1000m"

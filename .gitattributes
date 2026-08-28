@@ -1,0 +1,13 @@
+# Fuerza finales de línea LF en el repo, independientemente de la
+# configuración global de Git del desarrollador (p. ej. core.autocrlf=true
+# en Windows). Evita que pre-commit (mixed-line-ending --fix=lf) y el
+# checkout local entren en conflicto constante en cada commit.
+* text=auto eol=lf
+
+# Binarios: nunca normalizar finales de línea
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.pth binary
+*.pkl binary
+*.joblib binary

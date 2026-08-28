@@ -1,0 +1,79 @@
+# ========================
+# Python y Machine Learning
+# ========================
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+env/
+.venv/
+.env
+
+# Caché de herramientas de calidad (Fase 1: lint/format/type-check/test)
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.cache/
+
+# Artefactos y modelos pesados (deben ir a MLflow/DVC+S3, no a Git)
+mlruns/
+mlartifacts/
+core_ml/artifacts*/
+*.pth
+*.pt
+*.h5
+*.pkl
+*.joblib
+*.csv
+*.parquet
+
+# ========================
+# Terraform
+# ========================
+# Ignorar directorios de estado y módulos locales
+.terraform/
+*.tfstate
+*.tfstate.*
+
+# Archivos de plan guardados con -out: contienen valores sensibles
+# (passwords, access keys) en texto plano dentro del binario.
+tfplan
+*.tfplan
+
+# Ignorar archivos de registro de caídas
+crash.log
+crash.*.log
+
+# Ignorar archivos de variables con secretos
+*.tfvars
+*.tfvars.json
+
+# Ignorar archivos de anulación
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Archivos de CLI de Terraform
+.terraformrc
+terraform.rc
+
+# ========================
+# IDEs y Sistemas Operativos
+# ========================
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Estado interno de herramientas de asistencia (Claude Code, etc.)
+.claude/
+
+# ========================
+# Validación local de CI (Fase 4)
+# ========================
+# Salida generada por `gitlab-ci-local` (make ci-local / ci-local-list):
+# el YAML expandido, no una fuente de verdad versionada.
+.gitlab-ci-local/

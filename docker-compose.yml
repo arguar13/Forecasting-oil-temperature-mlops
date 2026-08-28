@@ -1,0 +1,162 @@
+# ==============================================================================
+# Fase 3: Entorno Local, Contenedores y Simulación de Nube.
+#
+# Replica el ecosistema completo de AWS localmente, sin costo ni credenciales
+# reales: LocalStack simula S3/SQS/Secrets Manager ("la falsa nube"), Postgres
+# simula RDS, y Kafka + MLflow + la API corren como en producción. Todos los
+# componentes se validan aquí -- con `docker-compose up` y con los tests de
+# Testcontainers en `core_ml/tests/integration/` -- antes de tocar AWS real.
+# ==============================================================================
+
+services:
+  # Base de datos local (Simula AWS RDS Postgres)
+  postgres:
+    image: postgres:18.3-alpine
+    environment:
+      POSTGRES_DB: mlflow_db
+      POSTGRES_USER: mlopsadmin
+      POSTGRES_PASSWORD: localpassword123  # pragma: allowlist secret -- credencial fija solo para el stack local emulado, nunca se usa fuera de docker-compose
+    ports:
+      - "5432:5432"
+    # Desde Postgres 18, la imagen oficial espera el volumen montado en
+    # /var/lib/postgresql (no en .../data): guarda los datos en una
+    # subcarpeta versionada (.../18/docker) para que pg_upgrade --link
+    # pueda migrar entre major versions sin copiar todo el volumen. Montar
+    # en .../data (convención pre-18) hace que el contenedor se niegue a
+    # arrancar ("invalid volume mount").
+    volumes:
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mlopsadmin -d mlflow_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # "La falsa nube": simula S3 (artefactos de modelo + datos DVC), SQS
+  # (eventos de batch inference) y Secrets Manager (credenciales), todo en un
+  # único contenedor. La app y los tests de integración le apuntan a esto en
+  # vez de a AWS real -- mismo API, cero costo, cero riesgo.
+  localstack:
+    # Pineado a la última tag Community (SemVer) pre-unificación: desde
+    # marzo 2026 LocalStack fusionó Community+Pro en una imagen "LocalStack
+    # for AWS" (tags calendario, p. ej. 2026.08.0) que exige un Auth Token
+    # de cuenta -- rompe la premisa de "cero costo, cero credenciales
+    # reales" de esta fase. Verificado: 4.14.0 corre S3/SQS/SecretsManager
+    # sin login, edition "community".
+    image: localstack/localstack:4.14.0
+    environment:
+      SERVICES: s3,sqs,secretsmanager
+      DEFAULT_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test  # pragma: allowlist secret -- credencial fija de LocalStack, nunca se usa fuera del stack local
+      PERSISTENCE: 1
+    ports:
+      - "4566:4566"
+    volumes:
+      - localstack_data:/var/lib/localstack
+      # Scripts que corren automáticamente cuando LocalStack está listo:
+      # crean el bucket S3, la cola SQS y el secreto -- ver localstack/init/.
+      - ./localstack/init:/etc/localstack/init/ready.d
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:4566/_localstack/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+
+  # Broker de eventos (KRaft, sin ZooKeeper). Hoy publica eventos de
+  # finalización del batch scoring (ver core_ml/src/events.py); queda
+  # disponible para futura ingesta/streaming.
+  kafka:
+    image: apache/kafka:4.3.1
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,PLAINTEXT_HOST://:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    ports:
+      - "29092:29092"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092"]
+      interval: 10s
+      timeout: 10s
+      retries: 15
+
+  # Crea el topic con partitions/replication explícitos (determinismo, en vez
+  # de depender del auto-create) y termina -- no es un servicio de larga vida.
+  kafka-init:
+    image: apache/kafka:4.3.1
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command: >
+      "/opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092
+      --create --if-not-exists --topic batch-inference-events
+      --partitions 1 --replication-factor 1"
+    restart: "no"
+
+  # Servidor de tracking
+  mlflow:
+    # La imagen oficial no trae driver de Postgres (ver mlflow.Dockerfile).
+    build:
+      context: .
+      dockerfile: mlflow.Dockerfile
+    command: mlflow server --backend-store-uri postgresql://mlopsadmin:localpassword123@postgres/mlflow_db --default-artifact-root s3://mlops-portafolio-proj3-models/mlflow --host 0.0.0.0  # pragma: allowlist secret -- credencial fija solo para el stack local emulado
+    ports:
+      - "5000:5000"
+    environment:
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test  # pragma: allowlist secret -- credencial fija de LocalStack, nunca se usa fuera del stack local
+      AWS_DEFAULT_REGION: us-east-1
+      MLFLOW_S3_ENDPOINT_URL: http://localstack:4566
+    depends_on:
+      postgres:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000')"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 15s
+
+  # API Inferencia Local (Tu contenedor de FastAPI)
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      # El modelo se resuelve por nombre+alias contra el MLflow Model
+      # Registry (ver api/main.py), no contra un bucket/ruta S3 fija.
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      MODEL_NAME: dlinear-ett-forecaster
+      MODEL_ALIAS: production
+      # MLflow descarga el artefacto del modelo desde LocalStack (backend S3
+      # del tracking server) usando estas credenciales.
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test  # pragma: allowlist secret -- credencial fija de LocalStack, nunca se usa fuera del stack local
+      AWS_DEFAULT_REGION: us-east-1
+      MLFLOW_S3_ENDPOINT_URL: http://localstack:4566
+    depends_on:
+      mlflow:
+        condition: service_healthy
+    command: uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 20s
+
+volumes:
+  pgdata:
+  localstack_data:

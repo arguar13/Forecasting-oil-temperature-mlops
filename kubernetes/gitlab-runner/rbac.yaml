@@ -1,0 +1,41 @@
+# El ejecutor "kubernetes" de GitLab Runner necesita crear/gestionar un pod
+# efímero por cada job (mas su ConfigMap/Secret/log/exec asociados) dentro
+# de este mismo namespace -- estos son los permisos mínimos documentados
+# por GitLab para ese ejecutor, acotados a "gitlab-runner" (nunca cluster-wide).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gitlab-runner
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: gitlab-runner
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["configmaps", "secrets", "services"]
+    verbs: ["get", "list", "watch", "create", "delete", "update"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: gitlab-runner
+subjects:
+  - kind: ServiceAccount
+    name: gitlab-runner
+roleRef:
+  kind: Role
+  name: gitlab-runner
+  apiGroup: rbac.authorization.k8s.io

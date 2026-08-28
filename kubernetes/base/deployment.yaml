@@ -1,0 +1,55 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dlinear-api
+  labels:
+    app: dlinear-forecast
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: dlinear-forecast
+  template:
+    metadata:
+      labels:
+        app: dlinear-forecast
+    spec:
+      serviceAccountName: dlinear-sa  # Enlace con IRSA
+      containers:
+      - name: dlinear-container
+        # Nombre lógico: el overlay de cada entorno lo remapea al registro/
+        # tag reales vía el transformer `images:` de Kustomize (nunca con
+        # `sed` ni `kubectl set image` -- ver kubernetes/overlays/production).
+        image: dlinear-api:base
+        ports:
+        - containerPort: 8000
+
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 15
+          periodSeconds: 20
+        readinessProbe:
+          # Distinto de /health: solo pasa si el modelo terminó de cargar
+          # (ver api/main.py::readiness_check) -- así el Service no le manda
+          # tráfico a un pod vivo pero todavía sin modelo en memoria.
+          httpGet:
+            path: /ready
+            port: 8000
+          initialDelaySeconds: 5
+          periodSeconds: 10
+
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+
+        # Toda la configuración no sensible vive en el ConfigMap (declarativo,
+        # generado por Kustomize) en vez de estar embebida aquí por servicio.
+        envFrom:
+        - configMapRef:
+            name: dlinear-config

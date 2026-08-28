@@ -1,0 +1,119 @@
+# MLflow Tracking Server + Model Registry para producción.
+#
+# El ConfigMap base (kustomization.yaml) ya declara
+# MLFLOW_TRACKING_URI=http://mlflow.dlinear-production.svc.cluster.local:5000
+# -- este Deployment/Service son los que hacen que ese nombre DNS
+# efectivamente exista en el cluster. Reutiliza la misma imagen que
+# docker-compose.yml levanta en local (mlflow.Dockerfile: la imagen oficial
+# de MLflow + psycopg2-binary, porque la oficial no trae driver de Postgres).
+#
+# Credenciales de la base de datos: NO se comitean a Git. El Secret
+# `mlflow-db-credentials` que este Deployment referencia se crea de forma
+# imperativa, una sola vez por cluster (igual que el secreto de RDS en AWS
+# Secrets Manager, ver terraform/rds.tf) -- por eso este archivo NO incluye
+# ningún manifiesto de tipo Secret ni está listado en kustomization.yaml:
+#
+#   kubectl create namespace dlinear-production --dry-run=client -o yaml | kubectl apply -f -
+#   kubectl create secret generic mlflow-db-credentials \
+#     --namespace dlinear-production \
+#     --from-literal=username=<mismo usuario que var.db_username en terraform> \
+#     --from-literal=password=<la misma password guardada en el secreto de Secrets Manager> \
+#
+# Así, ArgoCD (prune: true) nunca puede borrar este Secret -- no es un
+# recurso que declare ningún Application, exactamente igual que el propio
+# bootstrap de ArgoCD (kubectl apply -f gitops/argocd/application.yaml) es
+# un paso imperativo fuera de GitOps.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mlflow
+  labels:
+    app: mlflow
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mlflow
+  template:
+    metadata:
+      labels:
+        app: mlflow
+    spec:
+      # Reutiliza la misma Service Account/IRSA que la API: solo necesita
+      # leer/listar el bucket de artefactos (aws_iam_policy.dlinear_api_s3_read
+      # en terraform/iam.tf) para resolver URIs de modelos ya registrados.
+      # La escritura de artefactos de un run nuevo la hace directamente el
+      # cliente que entrena (train.py, con las credenciales del rol de CI),
+      # no el propio Tracking Server.
+      serviceAccountName: dlinear-sa
+      containers:
+        - name: mlflow-container
+          # Nombre lógico: el overlay de cada entorno lo remapea al
+          # registro/tag reales vía el transformer `images:` de Kustomize
+          # (mismo mecanismo que dlinear-api:base -- nunca `sed`, nunca
+          # `kubectl set image`).
+          image: mlflow-server:base
+          args:
+            - mlflow
+            - server
+            - --backend-store-uri
+            - postgresql://$(MLFLOW_DB_USERNAME):$(MLFLOW_DB_PASSWORD)@$(RDS_ENDPOINT)/mlflow_db
+            - --default-artifact-root
+            - s3://$(MODEL_BUCKET_NAME)/mlflow
+            - --host
+            - 0.0.0.0
+            - --port
+            - "5000"
+          ports:
+            - containerPort: 5000
+
+          envFrom:
+            - configMapRef:
+                name: dlinear-config
+          env:
+            - name: MLFLOW_DB_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: mlflow-db-credentials
+                  key: username
+            - name: MLFLOW_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mlflow-db-credentials
+                  key: password
+
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 5000
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 5000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+            limits:
+              memory: "1Gi"
+              cpu: "500m"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  # Nombre exacto que MLFLOW_TRACKING_URI espera resolver vía DNS interno
+  # del cluster: mlflow.<namespace>.svc.cluster.local.
+  name: mlflow
+spec:
+  selector:
+    app: mlflow
+  ports:
+    - protocol: TCP
+      port: 5000
+      targetPort: 5000
+  type: ClusterIP

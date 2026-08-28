@@ -1,0 +1,47 @@
+# Git
+.git
+.gitignore
+
+# Entornos virtuales de Python
+venv/
+env/
+.env
+.venv/
+
+# Caché de Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Caché de herramientas de calidad (no deben ir en la imagen productiva)
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Tests: no se ejecutan en el contenedor productivo
+**/tests/
+
+# Artefactos de Machine Learning (MLflow) y datos versionados por DVC
+mlruns/
+mlartifacts/
+core_ml/data/
+core_ml/artifacts*/
+.dvc/
+
+# Fase 3: infraestructura local simulada, no forma parte de la imagen
+localstack/
+docker-compose.yml
+
+# Archivos de Infraestructura (No deben ir en la imagen del contenedor)
+.terraform/
+*.tf
+*.tfstate*
+*.tfvars
+
+# Otros
+Dockerfile
+README.md

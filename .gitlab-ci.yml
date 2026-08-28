@@ -1,0 +1,247 @@
+# .gitlab-ci.yml
+#
+# Variables de proyecto/grupo requeridas en GitLab (Settings > CI/CD > Variables),
+# no definidas aquí por diseño: AWS_ACCOUNT_ID.
+variables:
+  AWS_REGION: "us-east-1"
+  ECR_REPOSITORY: "dlinear-forecast-api"
+  TF_ROOT: "terraform"
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
+  # MLflow (kubernetes/base/mlflow.yaml) es un Service ClusterIP -- solo
+  # resoluble DENTRO del cluster. Valor fijo (no una variable de proyecto)
+  # porque train_model y quality_gate corren en el runner self-hosted
+  # dentro de la VPC (ver kubernetes/gitlab-runner/, tag `in-vpc`), donde
+  # este nombre DNS interno siempre resuelve igual.
+  MLFLOW_TRACKING_URI: "http://mlflow.dlinear-production.svc.cluster.local:5000"
+
+stages:
+  - validate
+  - quality
+  - plan
+  - apply
+  - train
+  - quality-gate
+  - build-push
+  - deploy
+
+# Configuración base para autenticación OIDC en AWS
+.aws-auth:
+  id_tokens:
+    GITLAB_OIDC_TOKEN:
+      aud: https://gitlab.com
+  before_script:
+    - >
+      STS=($(aws sts assume-role-with-web-identity
+      --role-arn arn:aws:iam::${AWS_ACCOUNT_ID}:role/GitLabCI_OIDC_Role
+      --role-session-name "GitLabRunner-${CI_PROJECT_ID}-${CI_PIPELINE_ID}"
+      --web-identity-token ${GITLAB_OIDC_TOKEN}
+      --duration-seconds 3600
+      --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]'
+      --output text))
+    - export AWS_ACCESS_KEY_ID="${STS[0]}"
+    - export AWS_SECRET_ACCESS_KEY="${STS[1]}"
+    - export AWS_SESSION_TOKEN="${STS[2]}"
+
+# ========================
+# Terraform IaC Pipeline
+# ========================
+terraform:fmt:
+  stage: validate
+  image: hashicorp/terraform:1.5.0
+  script:
+    - cd $TF_ROOT
+    - terraform fmt -check
+
+# ========================
+# Validación Shift-Left (Fase 1: misma interfaz que en local)
+# ========================
+# El Makefile es la única interfaz de ejecución: lo que corre aquí es
+# exactamente `make ci`, lo mismo que un desarrollador ejecuta localmente
+# antes de hacer commit (vía pre-commit) o de abrir un MR.
+python:quality:
+  stage: quality
+  image: python:3.10
+  cache:
+    key: "poetry-$CI_COMMIT_REF_SLUG"
+    paths:
+      - .cache/pip
+  before_script:
+    - apt-get update && apt-get install -y --no-install-recommends make git
+    - pip install --no-cache-dir poetry==1.8.3 pre-commit
+  script:
+    - make install
+    - make ci
+
+security:trivy:
+  stage: quality
+  image: docker:24.0.5
+  services:
+    - docker:24.0.5-dind
+  script:
+    - docker run --rm -v "$CI_PROJECT_DIR":/repo aquasec/trivy:latest fs
+        --exit-code 1 --severity HIGH,CRITICAL --ignorefile /repo/.trivyignore /repo
+
+# ========================
+# Fase 3: Testcontainers (Postgres/Kafka/LocalStack efímeros + docker-compose.yml)
+# ========================
+# Requiere un runner con soporte Docker-in-Docker en modo privileged (mismo
+# requisito que docker:build-push/security:trivy). Si el runner compartido no
+# lo soporta, `allow_failure` evita bloquear el resto del pipeline -- pero el
+# resultado debe revisarse igual: es la prueba de que Postgres, LocalStack,
+# Kafka, MLflow y la API se integran correctamente antes de tocar AWS real.
+integration_tests:
+  stage: quality
+  image: docker:24.0.5
+  services:
+    - docker:24.0.5-dind
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_TLS_CERTDIR: ""
+  allow_failure: true
+  before_script:
+    - apk add --no-cache python3 py3-pip
+    - python3 -m venv /venv
+    - . /venv/bin/activate
+    - pip install --no-cache-dir poetry==1.8.3
+    - cd core_ml && poetry install --sync --no-interaction
+  script:
+    - . /venv/bin/activate
+    - cd core_ml && poetry run pytest -m integration --no-cov tests/integration
+
+terraform:plan:
+  stage: plan
+  extends: .aws-auth
+  image: hashicorp/terraform:1.5.0
+  script:
+    - cd $TF_ROOT
+    - terraform init
+    - terraform plan -out=tfplan
+
+terraform:apply:
+  stage: apply
+  extends: .aws-auth
+  image: hashicorp/terraform:1.5.0
+  script:
+    - cd $TF_ROOT
+    - terraform init
+    - terraform apply -auto-approve tfplan
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+
+# ========================
+# ML Pipeline (Core ML)
+# ========================
+# Cada corrida queda atada de forma inequívoca a:
+#   Git Commit Hash + DVC Data Hash + Hyperparameters + MLflow Run ID + Container Image Tag
+# (ver core_ml/src/mlflow_utils.py::build_reproducibility_tags). MLFLOW_TRACKING_URI
+# apunta al Service ClusterIP interno de MLflow (kubernetes/base/mlflow.yaml) --
+# por eso este job corre en el runner self-hosted dentro de la VPC
+# (kubernetes/gitlab-runner/), el único que puede resolver ese DNS interno.
+train_model:
+  stage: train
+  extends: .aws-auth
+  image: python:3.10
+  tags: ["in-vpc"]
+  variables:
+    CONTAINER_IMAGE_TAG: "$CI_COMMIT_SHA"
+  script:
+    - pip install --no-cache-dir poetry==1.8.3
+    - make install-core-ml
+    # DVC descarga el dataset versionado desde S3 (requiere credenciales de .aws-auth)
+    - cd core_ml && poetry run dvc pull data/raw/ETTh1.csv.dvc
+    # FAIL FAST: valida el contrato de datos y genera los tensores de entrenamiento
+    - poetry run python -m src.data_processing --dataset raw
+    # Entrena, registra en MLflow (métricas, tags de reproducibilidad, modelo empaquetado)
+    - poetry run python -m src.train --dataset raw
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+
+quality_gate:
+  stage: quality-gate
+  image: python:3.10
+  needs: ["train_model"]
+  # También necesita alcanzar el MLflow interno (MlflowClient contra
+  # MLFLOW_TRACKING_URI) -- mismo runner self-hosted que train_model.
+  tags: ["in-vpc"]
+  script:
+    - pip install --no-cache-dir poetry==1.8.3
+    - make install-core-ml
+    # Bloquea el pipeline (build-push/deploy nunca corren) si el modelo recién
+    # entrenado no supera a la versión actualmente en producción.
+    - cd core_ml && poetry run python -m src.quality_gate
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+
+# ========================
+# App CI/CD Pipeline (API)
+# ========================
+docker:build-push:
+  stage: build-push
+  extends: .aws-auth
+  image: docker:24.0.5
+  services:
+    - docker:24.0.5-dind
+  script:
+    - apk add --no-cache aws-cli
+    - aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
+    - ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+    # Construcción leyendo el Dockerfile de la raíz, el cual copia la carpeta api/
+    - docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$CI_COMMIT_SHA -f Dockerfile .
+    - docker push $ECR_REGISTRY/$ECR_REPOSITORY:$CI_COMMIT_SHA
+    # Sin tag `:latest`: el repo ECR es IMMUTABLE (terraform/ecr.tf) y cada
+    # despliegue queda atado a un SHA exacto, trazable y reproducible --
+    # un tag flotante reintroduciría justo la ambigüedad que la tupla de
+    # reproducibilidad de la Fase 2 existe para evitar.
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+
+# Publica la imagen del MLflow Tracking Server que corre en producción
+# (kubernetes/base/mlflow.yaml), en su propio repositorio ECR
+# (terraform/ecr.tf::dlinear_mlflow) -- mismo mlflow.Dockerfile que ya usa
+# docker-compose.yml en local, ahora también publicado para EKS.
+docker:build-push-mlflow:
+  stage: build-push
+  extends: .aws-auth
+  image: docker:24.0.5
+  services:
+    - docker:24.0.5-dind
+  script:
+    - apk add --no-cache aws-cli
+    - aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
+    - ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+    - docker build -t $ECR_REGISTRY/dlinear-mlflow-server:$CI_COMMIT_SHA -f mlflow.Dockerfile .
+    - docker push $ECR_REGISTRY/dlinear-mlflow-server:$CI_COMMIT_SHA
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+
+# ========================
+# GitOps: CI nunca toca el cluster. Solo declara el nuevo estado deseado en
+# Git (el tag de imagen, editado de forma estructural con `kustomize edit
+# set image` -- nunca `sed`, nunca `kubectl set image`) y lo comitea a
+# `main`. ArgoCD (ver gitops/argocd/) reconcilia el cluster desde ahí.
+# ========================
+kubernetes:deploy:
+  stage: deploy
+  image: python:3.10
+  needs: ["docker:build-push", "docker:build-push-mlflow"]
+  before_script:
+    - apt-get update && apt-get install -y --no-install-recommends git curl make
+    - curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
+    - mv kustomize /usr/local/bin/kustomize
+  script:
+    - cd kubernetes/overlays/production
+    - kustomize edit set image dlinear-api=${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/$ECR_REPOSITORY:$CI_COMMIT_SHA
+    - kustomize edit set image mlflow-server=${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/dlinear-mlflow-server:$CI_COMMIT_SHA
+    - cd "$CI_PROJECT_DIR"
+    - git config user.name "gitlab-ci"
+    - git config user.email "gitlab-ci@${CI_SERVER_HOST}"
+    - git add kubernetes/overlays/production/kustomization.yaml
+    # `[skip ci]`: este commit no debe disparar un pipeline nuevo -- de lo
+    # contrario, cada deploy dispararía otro pipeline que dispara otro
+    # deploy, un loop infinito (ver Regla Absoluta Final).
+    - 'git commit -m "deploy: dlinear-api@${CI_COMMIT_SHA} + mlflow-server@${CI_COMMIT_SHA} [skip ci]" || echo "Sin cambios que comitear"'
+    # Requiere habilitar "Allow this project's job tokens to push to this
+    # repository" en Settings > CI/CD > Token Access.
+    - git push "https://gitlab-ci-token:${CI_JOB_TOKEN}@${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git" HEAD:${CI_COMMIT_BRANCH}
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"

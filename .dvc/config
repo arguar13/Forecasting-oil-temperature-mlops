@@ -1,0 +1,15 @@
+# Remoto de producción: mismo bucket determinístico que crea Terraform
+# (terraform/s3.tf::model_artifacts_bucket_name = "${project_name}-model-
+# artifacts-${account_id}"), bajo el prefijo dvc-store/. El Account ID no
+# se conoce hasta el primer `terraform apply` (Fase L de la guía de
+# ejecución) -- se reemplaza UNA vez por entorno, igual que
+# REPLACE_WITH_AWS_ACCOUNT_ID en kubernetes/overlays/production/.
+#
+# Para desarrollo local contra LocalStack (Docker Compose), no se toca este
+# archivo: se usa `.dvc/config.local` (ver config.local.example), que DVC
+# aplica automáticamente por encima de este.
+[core]
+    analytics = false
+    remote = s3remote
+['remote "s3remote"']
+    url = s3://dlinear-forecast-cluster-model-artifacts-REPLACE_WITH_AWS_ACCOUNT_ID/dvc-store

@@ -1,0 +1,5 @@
+# Vulnerabilidades/hallazgos aceptados explícitamente (con justificación y fecha).
+# Formato: <CVE-o-ID> # motivo - fecha de revisión
+#
+# Ejemplo:
+# CVE-2023-XXXXX # falso positivo en dependencia transitiva de dev, no llega a runtime - 2026-08-26

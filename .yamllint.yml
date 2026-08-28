@@ -1,0 +1,29 @@
+# Configuración de yamllint (validación shift-left de manifiestos YAML)
+# Cubre: .gitlab-ci.yml, docker-compose.yml, kubernetes/*.yaml, gitops/argocd/*.yaml, .pre-commit-config.yaml
+extends: default
+
+yaml-files:
+  - "*.yaml"
+  - "*.yml"
+  - ".yamllint.yml"
+
+ignore: |
+  .venv/
+  **/.venv/
+  **/node_modules/
+  core_ml/data/
+
+rules:
+  line-length:
+    max: 200
+    level: warning
+  document-start: disable
+  truthy:
+    check-keys: false
+  comments-indentation: disable
+  braces:
+    max-spaces-inside: 1
+  brackets:
+    max-spaces-inside: 1
+  indentation:
+    indent-sequences: consistent

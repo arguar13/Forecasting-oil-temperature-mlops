@@ -1,0 +1,174 @@
+# Validación Shift-Left: un commit se rechaza automáticamente si falla
+# el linting, el formateo, el type checking, las pruebas, si se detecta un
+# secreto o si un archivo YAML es inválido.
+#
+# Instalación local:
+#   pip install pre-commit  (o: pipx install pre-commit)
+#   make hooks
+#
+# Los hooks de mypy/pytest son locales porque necesitan las dependencias
+# reales de cada subproyecto (instaladas de forma determinista vía Poetry);
+# ruff/black/isort/bandit/yamllint corren en entornos aislados que gestiona
+# pre-commit, versionados con `rev:` para reproducibilidad.
+
+repos:
+  # ---------------------------------------------------------
+  # Higiene general de archivos + validación de YAML/TOML
+  # ---------------------------------------------------------
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: mixed-line-ending
+        args: ["--fix=lf"]
+      - id: check-yaml
+        name: check-yaml (sintaxis válida)
+        args: ["--allow-multiple-documents"]
+      - id: check-toml
+      - id: check-json
+      - id: check-added-large-files
+        args: ["--maxkb=2048"]
+      - id: check-merge-conflict
+      - id: check-case-conflict
+      - id: debug-statements
+      - id: detect-private-key
+
+  # ---------------------------------------------------------
+  # YAML: estilo y buenas prácticas (GitLab CI, K8s, compose)
+  # ---------------------------------------------------------
+  - repo: https://github.com/adrienverge/yamllint
+    rev: v1.35.1
+    hooks:
+      - id: yamllint
+        args: ["-c", ".yamllint.yml"]
+
+  # ---------------------------------------------------------
+  # Secretos: rechaza el commit si detecta credenciales expuestas
+  # ---------------------------------------------------------
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.5.0
+    hooks:
+      - id: detect-secrets
+        args: ["--baseline", ".secrets.baseline"]
+        exclude: >
+          (?x)^(
+            .*\.lock|
+            .*\.dvc
+          )$
+
+  # ---------------------------------------------------------
+  # Python: import sorting (isort, profile=black) por subproyecto
+  # ---------------------------------------------------------
+  - repo: https://github.com/PyCQA/isort
+    rev: 5.13.2
+    hooks:
+      - id: isort
+        name: isort (api)
+        files: ^api/
+      - id: isort
+        name: isort (core_ml)
+        files: ^core_ml/
+
+  # ---------------------------------------------------------
+  # Python: formateo (Black) por subproyecto
+  # ---------------------------------------------------------
+  - repo: https://github.com/psf/black
+    rev: 24.8.0
+    hooks:
+      - id: black
+        name: black (api)
+        files: ^api/
+      - id: black
+        name: black (core_ml)
+        files: ^core_ml/
+
+  # ---------------------------------------------------------
+  # Python: linting estático (Ruff)
+  # ---------------------------------------------------------
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.6.9
+    hooks:
+      - id: ruff
+        args: ["--fix", "--exit-non-zero-on-fix"]
+
+  # ---------------------------------------------------------
+  # Python: análisis de seguridad estático (Bandit / SAST)
+  # ---------------------------------------------------------
+  - repo: https://github.com/PyCQA/bandit
+    rev: 1.7.9
+    hooks:
+      - id: bandit
+        name: bandit (api)
+        args: ["-c", "api/pyproject.toml"]
+        files: ^api/.*\.py$
+        exclude: ^api/tests/
+        additional_dependencies: ["bandit[toml]"]
+      - id: bandit
+        name: bandit (core_ml)
+        args: ["-c", "core_ml/pyproject.toml"]
+        files: ^core_ml/.*\.py$
+        exclude: ^core_ml/tests/
+        additional_dependencies: ["bandit[toml]"]
+
+  # ---------------------------------------------------------
+  # Python: type checking (mypy) — usa el venv real de Poetry
+  # ---------------------------------------------------------
+  - repo: local
+    hooks:
+      - id: mypy-api
+        name: mypy (api)
+        entry: bash -c 'cd api && poetry run mypy .'
+        language: system
+        files: ^api/.*\.py$
+        pass_filenames: false
+
+      - id: mypy-core-ml
+        name: mypy (core_ml)
+        entry: bash -c 'cd core_ml && poetry run mypy .'
+        language: system
+        files: ^core_ml/.*\.py$
+        pass_filenames: false
+
+      # -------------------------------------------------------
+      # Python: pruebas (pytest) — usa el venv real de Poetry
+      # -------------------------------------------------------
+      - id: pytest-api
+        name: pytest (api)
+        entry: bash -c 'cd api && poetry run pytest'
+        language: system
+        files: ^api/.*\.py$
+        pass_filenames: false
+
+      - id: pytest-core-ml
+        name: pytest (core_ml)
+        entry: bash -c 'cd core_ml && poetry run pytest'
+        language: system
+        files: ^core_ml/.*\.py$
+        pass_filenames: false
+
+  # ---------------------------------------------------------
+  # Infra: valida sintaxis de Terraform (fmt -check) si se toca IaC
+  # ---------------------------------------------------------
+  - repo: local
+    hooks:
+      - id: terraform-fmt-check
+        name: terraform fmt -check
+        entry: bash -c 'command -v terraform >/dev/null 2>&1 && terraform -chdir=terraform fmt -check -recursive || echo "terraform no instalado localmente, omitiendo (se valida en CI)"'
+        language: system
+        files: ^terraform/.*\.tf$
+        pass_filenames: false
+
+  # ---------------------------------------------------------
+  # Escaneo de vulnerabilidades de dependencias/IaC (Trivy)
+  # Se ejecuta en pre-push (no en cada commit) por su duración,
+  # y siempre en CI. Requiere Docker Desktop corriendo.
+  # ---------------------------------------------------------
+  - repo: local
+    hooks:
+      - id: trivy-fs-scan
+        name: trivy fs scan (dependencias + IaC + secretos)
+        entry: bash -c 'docker run --rm -v "$(pwd)":/repo aquasec/trivy:latest fs --exit-code 1 --severity HIGH,CRITICAL --ignorefile /repo/.trivyignore /repo'
+        language: system
+        pass_filenames: false
+        stages: [pre-push]

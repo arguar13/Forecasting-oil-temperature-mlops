@@ -1,0 +1,26 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - namespace.yaml
+  - serviceaccount.yaml
+  - deployment.yaml
+  - service.yaml
+  - hpa.yaml
+  - cronjob.yaml
+  - mlflow.yaml
+
+# Genera el ConfigMap con un sufijo hash derivado de su contenido: cualquier
+# cambio en estos valores produce un nombre nuevo, lo que fuerza un rollout
+# del Deployment/CronJob automáticamente (Kustomize actualiza las
+# referencias `envFrom.configMapRef.name` en todos los manifiestos por
+# nosotros -- sin `sed`, sin editar YAML a mano).
+configMapGenerator:
+  - name: dlinear-config
+    literals:
+      - MLFLOW_TRACKING_URI=http://mlflow.dlinear-production.svc.cluster.local:5000
+      - MODEL_NAME=dlinear-ett-forecaster
+      - MODEL_ALIAS=production
+      - BATCH_INPUT_KEY=batch/input_data.csv
+      - BATCH_OUTPUT_KEY=batch/predictions_output.csv
+      - KAFKA_BOOTSTRAP_SERVERS=kafka.dlinear-production.svc.cluster.local:9092

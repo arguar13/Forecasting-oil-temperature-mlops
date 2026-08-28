@@ -1,0 +1,40 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: dlinear-production
+
+resources:
+- ../../base
+
+# Único parche manual necesario por entorno: el Account ID en el ARN de
+# IRSA (Terraform lo conoce vía `data.aws_caller_identity`, pero el
+# manifiesto de K8s no puede leer outputs de Terraform directamente). Se
+# edita UNA vez al dar de alta el entorno, no en cada despliegue.
+patches:
+- path: serviceaccount-patch.yaml
+
+# Extiende (no reemplaza) el ConfigMap base con los valores específicos de
+# este entorno: el bucket S3 determinístico (mismo Account ID que abajo, ver
+# terraform/s3.tf::model_artifacts_bucket_name) y el endpoint de RDS que usa
+# el Deployment de MLflow (kubernetes/base/mlflow.yaml) para su
+# --backend-store-uri -- ver `terraform output rds_endpoint`. Ninguno de los
+# dos es secreto (la contraseña de RDS vive en el Secret imperativo
+# `mlflow-db-credentials`, fuera de Kustomize/Git -- ver mlflow.yaml).
+configMapGenerator:
+- behavior: merge
+  literals:
+  - MODEL_BUCKET_NAME=dlinear-forecast-cluster-model-artifacts-REPLACE_WITH_AWS_ACCOUNT_ID
+  - RDS_ENDPOINT=REPLACE_WITH_RDS_ENDPOINT
+  name: dlinear-config
+
+# El ÚNICO punto que cambia en cada despliegue. CI lo actualiza de forma
+# estructural con `kustomize edit set image` (nunca sed, nunca
+# `kubectl set image`) y comitea el cambio a Git; ArgoCD sincroniza el
+# cluster desde ese commit. Ver .gitlab-ci.yml::kubernetes:deploy.
+images:
+- name: dlinear-api
+  newName: REPLACE_WITH_AWS_ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/dlinear-forecast-api
+  newTag: latest
+- name: mlflow-server
+  newName: REPLACE_WITH_AWS_ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/dlinear-mlflow-server
+  newTag: latest
