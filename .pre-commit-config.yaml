@@ -168,7 +168,10 @@ repos:
     hooks:
       - id: trivy-fs-scan
         name: trivy fs scan (dependencias + IaC + secretos)
-        entry: bash -c 'docker run --rm -v "$(pwd)":/repo aquasec/trivy:latest fs --exit-code 1 --severity HIGH,CRITICAL --ignorefile /repo/.trivyignore /repo'
+        # MSYS_NO_PATHCONV: en Git Bash para Windows, "/repo" se traduce
+        # automáticamente a una ruta de Windows (ej. "C:/Program Files/Git/repo"),
+        # rompiendo tanto el destino del volumen como --ignorefile. No-op en Linux/Mac.
+        entry: bash -c 'MSYS_NO_PATHCONV=1 docker run --rm -v "$(pwd)":/repo aquasec/trivy:latest fs --exit-code 1 --severity HIGH,CRITICAL --ignorefile /repo/.trivyignore /repo'
         language: system
         pass_filenames: false
         stages: [pre-push]
