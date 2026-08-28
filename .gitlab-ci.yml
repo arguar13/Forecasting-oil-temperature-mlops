@@ -47,17 +47,21 @@ stages:
           apt-get update -qq && apt-get install -y -qq awscli >/dev/null
         fi
       fi
+    # STS=(...) es sintaxis de array de bash -- hashicorp/terraform:1.5.0 y
+    # docker:24.0.5 no traen bash (solo /bin/sh, dash/ash), donde falla con
+    # "syntax error: unexpected (". awk sobre la salida --output text es
+    # POSIX y funciona igual en bash, dash o ash.
     - >
-      STS=($(aws sts assume-role-with-web-identity
+      STS_OUTPUT=$(aws sts assume-role-with-web-identity
       --role-arn arn:aws:iam::${AWS_ACCOUNT_ID}:role/GitLabCI_OIDC_Role
       --role-session-name "GitLabRunner-${CI_PROJECT_ID}-${CI_PIPELINE_ID}"
       --web-identity-token ${GITLAB_OIDC_TOKEN}
       --duration-seconds 3600
       --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]'
-      --output text))
-    - export AWS_ACCESS_KEY_ID="${STS[0]}"
-    - export AWS_SECRET_ACCESS_KEY="${STS[1]}"
-    - export AWS_SESSION_TOKEN="${STS[2]}"
+      --output text)
+    - export AWS_ACCESS_KEY_ID=$(echo "$STS_OUTPUT" | awk '{print $1}')
+    - export AWS_SECRET_ACCESS_KEY=$(echo "$STS_OUTPUT" | awk '{print $2}')
+    - export AWS_SESSION_TOKEN=$(echo "$STS_OUTPUT" | awk '{print $3}')
 
 # Rol separado (TerraformCI_OIDC_Role en terraform/iam.tf::terraform_ci_role)
 # con PowerUserAccess + permisos de IAM acotados -- terraform:plan/apply
@@ -78,16 +82,16 @@ stages:
         fi
       fi
     - >
-      STS=($(aws sts assume-role-with-web-identity
+      STS_OUTPUT=$(aws sts assume-role-with-web-identity
       --role-arn arn:aws:iam::${AWS_ACCOUNT_ID}:role/TerraformCI_OIDC_Role
       --role-session-name "GitLabRunner-${CI_PROJECT_ID}-${CI_PIPELINE_ID}"
       --web-identity-token ${GITLAB_OIDC_TOKEN}
       --duration-seconds 3600
       --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]'
-      --output text))
-    - export AWS_ACCESS_KEY_ID="${STS[0]}"
-    - export AWS_SECRET_ACCESS_KEY="${STS[1]}"
-    - export AWS_SESSION_TOKEN="${STS[2]}"
+      --output text)
+    - export AWS_ACCESS_KEY_ID=$(echo "$STS_OUTPUT" | awk '{print $1}')
+    - export AWS_SECRET_ACCESS_KEY=$(echo "$STS_OUTPUT" | awk '{print $2}')
+    - export AWS_SESSION_TOKEN=$(echo "$STS_OUTPUT" | awk '{print $3}')
 
 # ========================
 # Terraform IaC Pipeline
