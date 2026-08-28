@@ -92,9 +92,15 @@ stages:
 # ========================
 # Terraform IaC Pipeline
 # ========================
+# entrypoint: [""] en los 3 jobs de abajo: la imagen oficial hashicorp/terraform
+# tiene ENTRYPOINT ["terraform"], así que sin esto cada línea de `script`
+# se ejecuta como "terraform <línea>" en vez de por una shell -- el job
+# fallaba con 'Terraform has no command named "sh"'.
 terraform:fmt:
   stage: validate
-  image: hashicorp/terraform:1.5.0
+  image:
+    name: hashicorp/terraform:1.5.0
+    entrypoint: [""]
   script:
     - cd $TF_ROOT
     - terraform fmt -check
@@ -160,7 +166,9 @@ integration_tests:
 terraform:plan:
   stage: plan
   extends: .aws-auth-terraform
-  image: hashicorp/terraform:1.5.0
+  image:
+    name: hashicorp/terraform:1.5.0
+    entrypoint: [""]
   script:
     - cd $TF_ROOT
     - terraform init
@@ -175,7 +183,9 @@ terraform:plan:
 terraform:apply:
   stage: apply
   extends: .aws-auth-terraform
-  image: hashicorp/terraform:1.5.0
+  image:
+    name: hashicorp/terraform:1.5.0
+    entrypoint: [""]
   script:
     - cd $TF_ROOT
     - terraform init
