@@ -11,7 +11,12 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import UTC, datetime
+
+# datetime.UTC solo existe desde Python 3.11 -- el runtime real del
+# proyecto es 3.10 (ver pyproject.toml y la imagen `python:3.10` de CI);
+# probarlo con un venv local en 3.12 (donde datetime.UTC sí existe) no
+# lo detecta, timezone.utc es el equivalente compatible con 3.10+.
+from datetime import datetime, timezone
 from typing import Any
 
 from src.logging_config import get_logger
@@ -61,7 +66,7 @@ def publish_batch_inference_completed(
     """Notifica que un ciclo de batch inference terminó exitosamente."""
     payload = {
         "event": "batch_inference_completed",
-        "timestamp": datetime.now(UTC).isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "bucket": bucket,
         "output_key": output_key,
         "n_predictions": n_predictions,
