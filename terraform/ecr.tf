@@ -25,7 +25,7 @@ resource "aws_ecr_lifecycle_policy" "cleanup_policy" {
     rules = [
       {
         rulePriority = 1
-        description  = "Conservar las últimas 10 imágenes (rollback); expirar el resto"
+        description  = "Keep the last 10 images (rollback); expire the rest"
         selection = {
           tagStatus   = "any"
           countType   = "imageCountMoreThan"
@@ -65,7 +65,7 @@ resource "aws_ecr_lifecycle_policy" "mlflow_cleanup_policy" {
     rules = [
       {
         rulePriority = 1
-        description  = "Conservar las últimas 10 imágenes (rollback); expirar el resto"
+        description  = "Keep the last 10 images (rollback); expire the rest"
         selection = {
           tagStatus   = "any"
           countType   = "imageCountMoreThan"

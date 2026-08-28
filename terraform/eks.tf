@@ -2,8 +2,12 @@ module "eks" {
   source  = "terraform-aws-modules/eks/aws"
   version = "19.16.0"
 
-  cluster_name    = "${var.project_name}-eks"
-  cluster_version = "1.30"
+  cluster_name = "${var.project_name}-eks"
+  # 1.30 salió de soporte extendido en AWS (el AMI administrado dejó de
+  # publicarse para esa versión, "terraform apply" fallaba con
+  # "Requested AMI for this version 1.30 is not supported") -- 1.36 es la
+  # versión estándar actual (mayor ventana de soporte).
+  cluster_version = "1.36"
 
   vpc_id                         = module.vpc.vpc_id
   subnet_ids                     = module.vpc.private_subnets

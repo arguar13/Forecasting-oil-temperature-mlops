@@ -1,7 +1,9 @@
 # Security Group para RDS (Zero-Trust con EKS)
 resource "aws_security_group" "rds_sg" {
   name        = "${var.project_name}-rds-sg"
-  description = "Permitir tráfico PostgreSQL exclusivamente desde EKS"
+  # GroupDescription de EC2 solo admite ASCII ("terraform apply" fallaba con
+  # "Character sets beyond ASCII are not supported" por la tilde en "trafico").
+  description = "Allow PostgreSQL traffic exclusively from EKS"
   vpc_id      = module.vpc.vpc_id
 
   ingress {
