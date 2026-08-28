@@ -16,6 +16,18 @@ module "eks" {
   # AGREGADO: Habilitar OIDC para IRSA (IAM Roles for Service Accounts)
   enable_irsa = true
 
+  # Sin esto, el módulo pone como único "KeyAdministrator" de la KMS key de
+  # secrets al caller ACTUAL del apply -- terraform:plan en CI (asumiendo
+  # TerraformCI_OIDC_Role) fallaba con "AccessDeniedException: ... because
+  # no resource-based policy allows the kms:DescribeKey action", porque la
+  # key policy nunca delega en IAM (no incluye al account root). Se listan
+  # ambos: el operador local (Fase L/N) y el rol de CI, para que cualquiera
+  # de los dos pueda leer/administrar la key en applies subsecuentes.
+  kms_key_administrators = [
+    data.aws_caller_identity.current.arn,
+    aws_iam_role.terraform_ci_role.arn,
+  ]
+
   # Nombre corto deliberado: el módulo EKS genera un IAM role name_prefix como
   # "<clave>-eks-node-group-", limitado a 38 caracteres por la API de IAM --
   # "dlinear_inference_nodes" lo excedía ("terraform plan" fallaba con
