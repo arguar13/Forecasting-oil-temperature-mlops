@@ -130,7 +130,10 @@ def validate_ett_dataframe(df: pd.DataFrame, contract: ETTDatasetContract = ETT_
         )
 
     try:
-        pd.to_datetime(df["date"])
+        # format explícito: sin esto, pandas emite UserWarning ("Could not
+        # infer format... falling back to dateutil") por cada fila -- el
+        # dataset ETT siempre usa este formato exacto (ver data/toy/ETTh1_toy.csv).
+        pd.to_datetime(df["date"], format="%Y-%m-%d %H:%M:%S")
     except (ValueError, TypeError) as exc:
         violations.append(f"La columna 'date' contiene valores no parseables como fecha: {exc}")
     else:

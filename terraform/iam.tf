@@ -268,6 +268,62 @@ resource "aws_iam_role_policy" "terraform_ci_iam_scoped" {
           "iam:TagOpenIDConnectProvider",
         ]
         Resource = "arn:aws:iam::*:oidc-provider/gitlab.com"
+      },
+      {
+        # Solo lectura, sin restricción de nombre: el módulo EKS crea roles
+        # auxiliares (rol del cluster, rol del node group) con nombres que
+        # el propio módulo genera -- no siguen el prefijo "dlinear-*" (ej.
+        # "inference-eks-node-group-...") -- así que el refresh de
+        # `terraform plan` (lee CUALQUIER recurso ya trackeado en el state)
+        # fallaba con AccessDenied aunque nunca necesite CREAR nada fuera
+        # de esos prefijos. Los permisos de escritura de arriba sí siguen
+        # acotados por prefijo -- esto no habilita escalar privilegios.
+        Effect = "Allow"
+        Action = [
+          "iam:GetRole",
+          "iam:GetRolePolicy",
+          "iam:ListRolePolicies",
+          "iam:ListAttachedRolePolicies",
+          "iam:ListInstanceProfilesForRole",
+        ]
+        Resource = "*"
+      }
+    ]
+  })
+}
+
+# El módulo EKS crea y administra su propia KMS key (cifrado de secrets de
+# Kubernetes) -- la key policy que genera no incluye a este rol, y
+# PowerUserAccess por sí solo no basta para KMS cuando la key policy no
+# delega en IAM. Acotado a la key de este cluster (tag Environment=production
+# puesto por module.eks.module.kms), no a todas las keys de la cuenta.
+resource "aws_iam_role_policy" "terraform_ci_kms" {
+  name = "kms-manage-eks-cluster-key"
+  role = aws_iam_role.terraform_ci_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "kms:DescribeKey",
+          "kms:GetKeyPolicy",
+          "kms:GetKeyRotationStatus",
+          "kms:ListResourceTags",
+          "kms:CreateKey",
+          "kms:CreateAlias",
+          "kms:DeleteAlias",
+          "kms:UpdateAlias",
+          "kms:EnableKeyRotation",
+          "kms:DisableKeyRotation",
+          "kms:PutKeyPolicy",
+          "kms:TagResource",
+          "kms:UntagResource",
+          "kms:ScheduleKeyDeletion",
+          "kms:CancelKeyDeletion",
+        ]
+        Resource = "*"
       }
     ]
   })
