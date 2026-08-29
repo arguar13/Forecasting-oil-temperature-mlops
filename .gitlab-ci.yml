@@ -188,6 +188,13 @@ security:trivy:
     paths:
       - .cache/trivy
   script:
+    # El servicio docker:24.0.5-dind a veces todavía no acepta conexiones
+    # cuando arranca este script (GitLab espera a que el puerto esté
+    # escuchando, no a que el daemon esté listo para servir requests) --
+    # "Cannot connect to the Docker daemon at tcp://docker:2375" instantáneo,
+    # verificado en un run real (dos veces seguidas). Reintenta la conexión
+    # en vez de asumir que el daemon ya está listo.
+    - i=0; until docker info >/dev/null 2>&1 || [ $i -ge 30 ]; do i=$((i+1)); sleep 2; done
     # Versión pineada, no ":latest" -- igual que el resto de las imágenes de
     # este pipeline (python:3.10, docker:24.0.5, hashicorp/terraform:1.15.9):
     # una release nueva de trivy puede cambiar de CLI o marcar CVEs nuevas de
@@ -401,6 +408,9 @@ docker:build-push:
     DOCKER_TLS_CERTDIR: ""
   script:
     - apk add --no-cache aws-cli
+    # Ver el comentario equivalente en security:trivy -- el dind service a
+    # veces todavía no acepta conexiones cuando arranca el script.
+    - i=0; until docker info >/dev/null 2>&1 || [ $i -ge 30 ]; do i=$((i+1)); sleep 2; done
     - aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
     - ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
     # Cache de capas entre corridas: el repo ECR es inmutable (no hay tag
@@ -440,6 +450,9 @@ docker:build-push-mlflow:
     DOCKER_TLS_CERTDIR: ""
   script:
     - apk add --no-cache aws-cli
+    # Ver el comentario equivalente en security:trivy -- el dind service a
+    # veces todavía no acepta conexiones cuando arranca el script.
+    - i=0; until docker info >/dev/null 2>&1 || [ $i -ge 30 ]; do i=$((i+1)); sleep 2; done
     - aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
     - ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
     # Ver el comentario equivalente en docker:build-push -- misma estrategia
