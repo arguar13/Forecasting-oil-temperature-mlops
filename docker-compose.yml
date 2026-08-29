@@ -30,7 +30,15 @@ services:
       test: ["CMD-SHELL", "pg_isready -U mlopsadmin -d mlflow_db"]
       interval: 5s
       timeout: 5s
-      retries: 10
+      # 20, no 10: integration_tests (.gitlab-ci.yml) corre este mismo
+      # docker-compose.yml dentro de Docker-in-Docker anidado, en un host
+      # compartido con otros proyectos -- bajo esa contención, "healthy"
+      # tarda más que en un `make up` local sin carga. Más reintentos no
+      # cuesta nada en el camino feliz (Docker deja de sondear en cuanto
+      # el servicio da healthy), solo da margen real cuando el host está
+      # ocupado. Verificado: test_docker_compose_stack.py fallando por
+      # agotar el presupuesto de espera, no por un servicio realmente roto.
+      retries: 20
 
   # "La falsa nube": simula S3 (artefactos de modelo + datos DVC), SQS
   # (eventos de batch inference) y Secrets Manager (credenciales), todo en un
@@ -61,7 +69,8 @@ services:
       test: ["CMD", "curl", "-fs", "http://localhost:4566/_localstack/health"]
       interval: 5s
       timeout: 5s
-      retries: 15
+      # 25, ver la nota equivalente en postgres.healthcheck.
+      retries: 25
 
   # Broker de eventos (KRaft, sin ZooKeeper). Hoy publica eventos de
   # finalización del batch scoring (ver core_ml/src/events.py); queda
@@ -85,7 +94,10 @@ services:
       test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092"]
       interval: 10s
       timeout: 10s
-      retries: 15
+      # 40 (~6.7min), ver la nota en postgres.healthcheck -- este y los dos
+      # de abajo (mlflow, api) son los más lentos en arrancar bajo carga,
+      # así que llevan el mayor margen.
+      retries: 40
 
   # Crea el topic con partitions/replication explícitos (determinismo, en vez
   # de depender del auto-create) y termina -- no es un servicio de larga vida.
@@ -124,7 +136,8 @@ services:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000')"]
       interval: 10s
       timeout: 5s
-      retries: 15
+      # 40 (~6.7min), ver la nota en kafka.healthcheck.
+      retries: 40
       start_period: 15s
 
   # API Inferencia Local (Tu contenedor de FastAPI)
@@ -154,7 +167,8 @@ services:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 10s
       timeout: 5s
-      retries: 15
+      # 40 (~6.7min), ver la nota en kafka.healthcheck.
+      retries: 40
       start_period: 20s
 
   # Entrenamiento local (Fase E) -- corre en Linux, igual que el job

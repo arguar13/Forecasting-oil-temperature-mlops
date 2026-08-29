@@ -313,20 +313,18 @@ terraform:apply:
     - if: $CI_COMMIT_BRANCH == "main"
       changes:
         - terraform/**/*
-  # Reintenta ante fallos transitorios de propagación de IAM: un permiso
-  # nuevo (ver terraform_ci_iam_scoped en iam.tf) puede tardar unos
-  # segundos en propagarse a los demás endpoints de AWS, y un recurso que
-  # lo necesita (ej. EKS creando un node group con PassRole) puede
-  # rechazarse aunque la política ya se haya aplicado con éxito segundos
-  # antes -- verificado en un apply real (AccessDeniedException con la
-  # política ya "Modifications complete"). Un depends_on/time_sleep
-  # explícito en el módulo de EKS terminó rompiendo la resolución interna
-  # de un for_each del propio módulo ("Invalid for_each argument": claves
-  # que dependen de valores que ya no se conocían en el plan) -- reintentar
-  # el job completo es más robusto que pelear con el for_each interno de
-  # un módulo de terceros, y para cuando corre el reintento ya pasó tiempo
-  # real de sobra para que IAM haya propagado el cambio.
-  retry: 2
+  # NO retry: se probó "retry: 2" para el caso de propagación de IAM (un
+  # permiso nuevo tarda unos segundos en propagarse -- ver el historial de
+  # terraform_ci_iam_scoped en iam.tf) y resultó contraproducente para una
+  # falla distinta y más frecuente en este runner: el job a veces reporta
+  # "failed" (con el log cortado a mitad de camino) después de que el
+  # apply YA modificó el estado real con éxito -- verificado comparando
+  # contra la infraestructura real (`terraform plan` -> "No changes")
+  # tras uno de estos "fallos". Reintentar en ese caso usa el MISMO tfplan
+  # (ya desactualizado porque el intento anterior sí aplicó cambios) y
+  # falla garantizado con "Saved plan is stale". Un push nuevo (que de
+  # todos modos genera un terraform:plan fresco) es la recuperación
+  # correcta, no un retry ciego del mismo job.
 
 # ========================
 # ML Pipeline (Core ML)
