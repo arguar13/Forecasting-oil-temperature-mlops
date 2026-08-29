@@ -12,8 +12,19 @@ pandas = "^2.2.0"
 boto3 = "^1.34.0"
 psycopg2-binary = "^2.9.9" # Conexión MLflow a PostgreSQL
 mlflow = "^2.16.0"
-dvc = {extras = ["s3"], version = "^3.55.0"} # DVC integrado correctamente
-torch = "^2.3.0"
+# DVC integrado correctamente
+dvc = {extras = ["s3"], version = "^3.55.0"}
+# CPU-only: el wheel estándar de PyPI empaqueta el runtime CUDA completo
+# (nvidia-cublas/cudnn/cusolver/... , varios GB) aunque nunca se ejecuta --
+# ningún nodo en este proyecto tiene GPU (EKS: t3.large: ver
+# terraform/eks.tf; runners de CI; entrenamiento local en
+# core_ml/train.Dockerfile) y el código ya hace fallback explícito
+# (train.py: `torch.device("cuda" if torch.cuda.is_available() else
+# "cpu")`). Ese peso muerto infló la imagen de la API a ~8.26GB, causando
+# timeouts reales de red en el push a ECR ("use of closed network
+# connection" tras >19 min subiendo una sola capa, verificado en un run
+# real del pipeline) y contribuyendo al DiskPressure de los nodos.
+torch = {version = "^2.3.0", source = "pytorch-cpu"}
 
 # Machine Learning & Optimization
 scikit-learn = "^1.5.0"
@@ -47,6 +58,11 @@ types-pyyaml = "^6.0.12"
 # Fase 3: integración local con contenedores efímeros (Postgres, Kafka,
 # LocalStack) y orquestación de docker-compose.yml desde los tests.
 testcontainers = "^4.15.0"
+
+[[tool.poetry.source]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+priority = "explicit"
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]
