@@ -28,6 +28,11 @@ variables:
   # ~100 paquetes -- torch incluido -- en cada corrida del pipeline, aunque
   # el "cache:" de abajo esté declarado.
   POETRY_CACHE_DIR: "$CI_PROJECT_DIR/.cache/poetry"
+  # terraform:fmt/plan/apply corren en 3 jobs (=3 contenedores) distintos,
+  # cada uno con su propio "terraform init" -- sin esto, cada uno vuelve a
+  # descargar los ~5 providers (aws, kubernetes, tls, cloudinit, time) desde
+  # registry.terraform.io en cada corrida del pipeline.
+  TF_PLUGIN_CACHE_DIR: "$CI_PROJECT_DIR/.cache/terraform-plugins"
   # MLflow (kubernetes/base/mlflow.yaml) es un Service ClusterIP -- solo
   # resoluble DENTRO del cluster. Valor fijo (no una variable de proyecto)
   # porque train_model y quality_gate corren en el runner self-hosted
@@ -174,8 +179,21 @@ security:trivy:
   variables:
     DOCKER_HOST: tcp://docker:2375
     DOCKER_TLS_CERTDIR: ""
+  # .cache/trivy vive en el workspace del JOB (lo que "cache:" persiste
+  # entre corridas) y se monta dentro del contenedor efímero de trivy -- sin
+  # esto, la base de datos de vulnerabilidades (~110MB) se re-descarga en
+  # cada pipeline en vez de solo actualizarse incrementalmente.
+  cache:
+    key: "trivy-db"
+    paths:
+      - .cache/trivy
   script:
-    - docker run --rm -v "$CI_PROJECT_DIR":/repo aquasec/trivy:latest fs
+    # Versión pineada, no ":latest" -- igual que el resto de las imágenes de
+    # este pipeline (python:3.10, docker:24.0.5, hashicorp/terraform:1.15.9):
+    # una release nueva de trivy puede cambiar de CLI o marcar CVEs nuevas de
+    # un día para el otro, rompiendo el pipeline sin que el código haya
+    # cambiado. Mantener sincronizado con Makefile::trivy (mismo pin).
+    - docker run --rm -v "$CI_PROJECT_DIR":/repo -v "$CI_PROJECT_DIR/.cache/trivy":/root/.cache/trivy aquasec/trivy:0.74.0 fs
         --exit-code 1 --severity HIGH,CRITICAL --ignorefile /repo/.trivyignore
         --skip-dirs "**/.terraform,**/mlruns,**/mlartifacts,**/.claude"
         --skip-files "**/*.tfstate,**/*.tfstate.*" /repo
@@ -250,7 +268,12 @@ terraform:plan:
   image:
     name: hashicorp/terraform:1.15.9
     entrypoint: [""]
+  cache:
+    key: "terraform-plugins"
+    paths:
+      - .cache/terraform-plugins
   script:
+    - mkdir -p "$TF_PLUGIN_CACHE_DIR"
     - cd $TF_ROOT
     - terraform init
     - terraform plan -out=tfplan
@@ -268,7 +291,12 @@ terraform:apply:
   image:
     name: hashicorp/terraform:1.15.9
     entrypoint: [""]
+  cache:
+    key: "terraform-plugins"
+    paths:
+      - .cache/terraform-plugins
   script:
+    - mkdir -p "$TF_PLUGIN_CACHE_DIR"
     - cd $TF_ROOT
     - terraform init
     - terraform apply -auto-approve tfplan
@@ -298,8 +326,11 @@ train_model:
     # export" + pip evita la ruta de código rota sin perder el pineado
     # exacto del lockfile. Tampoco depende de "make" (python:3.10 no lo
     # trae preinstalado).
+    # --only main, no --with dev: este job entrena, no corre tests --
+    # pytest/mypy/ruff/bandit/testcontainers (y sus propias dependencias
+    # transitivas) no hacen falta acá, solo alargan el install.
     - pip install --no-cache-dir poetry==1.8.3 poetry-plugin-export==1.8.0
-    - cd core_ml && poetry export -f requirements.txt --without-hashes -o /tmp/requirements.txt --with dev
+    - cd core_ml && poetry export -f requirements.txt --without-hashes -o /tmp/requirements.txt --only main
     - pip install --no-cache-dir -r /tmp/requirements.txt
     # DVC descarga el dataset versionado desde S3 (requiere credenciales de .aws-auth)
     - dvc pull data/raw/ETTh1.csv.dvc
@@ -318,8 +349,9 @@ quality_gate:
   # MLFLOW_TRACKING_URI) -- mismo runner self-hosted que train_model.
   tags: ["in-vpc"]
   script:
+    # --only main: mismo motivo que en train_model, este job tampoco corre tests.
     - pip install --no-cache-dir poetry==1.8.3 poetry-plugin-export==1.8.0
-    - cd core_ml && poetry export -f requirements.txt --without-hashes -o /tmp/requirements.txt --with dev
+    - cd core_ml && poetry export -f requirements.txt --without-hashes -o /tmp/requirements.txt --only main
     - pip install --no-cache-dir -r /tmp/requirements.txt
     # Bloquea el pipeline (build-push/deploy nunca corren) si el modelo recién
     # entrenado no supera a la versión actualmente en producción. Ya estamos
@@ -408,9 +440,13 @@ kubernetes:deploy:
   image: python:3.10
   needs: ["docker:build-push", "docker:build-push-mlflow"]
   before_script:
-    - apt-get update && apt-get install -y --no-install-recommends git curl make
-    - curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
-    - mv kustomize /usr/local/bin/kustomize
+    - apt-get update && apt-get install -y --no-install-recommends git curl
+    # Binario pineado (misma versión que kustomize local, ver
+    # Prerrequisitos), no el script "install_kustomize.sh@master" -- una
+    # rama sin pinear puede cambiar de contenido en cualquier momento
+    # (riesgo de cadena de suministro) y además siempre trae la última
+    # versión, no una determinista.
+    - curl -sL "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv5.7.1/kustomize_v5.7.1_linux_amd64.tar.gz" | tar xz -C /usr/local/bin
   script:
     - cd kubernetes/overlays/production
     - kustomize edit set image dlinear-api=${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/$ECR_REPOSITORY:$CI_COMMIT_SHA

@@ -177,7 +177,8 @@ repos:
         # .claude: estado interno del asistente (incluye locks activos, ej.
         # scheduled_tasks.lock) -- trivy podía colgarse esperando el lock
         # con "semaphore acquire: context deadline exceeded".
-        entry: bash -c 'MSYS_NO_PATHCONV=1 docker run --rm -v "$(pwd)":/repo aquasec/trivy:latest fs --exit-code 1 --severity HIGH,CRITICAL --ignorefile /repo/.trivyignore --skip-dirs "**/.terraform,**/mlruns,**/mlartifacts,**/.claude" --skip-files "**/*.tfstate,**/*.tfstate.*" /repo'
+        # Versión pineada, no ":latest" -- ver Makefile::trivy / .gitlab-ci.yml::security:trivy (mismo pin en los tres).
+        entry: bash -c 'MSYS_NO_PATHCONV=1 docker run --rm -v "$(pwd)":/repo aquasec/trivy:0.74.0 fs --exit-code 1 --severity HIGH,CRITICAL --ignorefile /repo/.trivyignore --skip-dirs "**/.terraform,**/mlruns,**/mlartifacts,**/.claude" --skip-files "**/*.tfstate,**/*.tfstate.*" /repo'
         language: system
         pass_filenames: false
         stages: [pre-push]

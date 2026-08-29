@@ -108,8 +108,10 @@ secrets-scan: ## Escanea el repo en busca de secretos expuestos (detect-secrets)
 secrets-baseline: ## Regenera .secrets.baseline tras auditar nuevos hallazgos
 	detect-secrets scan --baseline .secrets.baseline
 
+# Versión pineada (no ":latest"), igual que en .gitlab-ci.yml::security:trivy
+# -- mantener ambas sincronizadas si se actualiza una.
 trivy: ## Escanea dependencias, IaC y secretos con Trivy (requiere Docker)
-	MSYS_NO_PATHCONV=1 docker run --rm -v "$$(pwd)":/repo aquasec/trivy:latest fs \
+	MSYS_NO_PATHCONV=1 docker run --rm -v "$$(pwd)":/repo aquasec/trivy:0.74.0 fs \
 		--exit-code 1 --severity HIGH,CRITICAL --ignorefile /repo/.trivyignore \
 		--skip-dirs "**/.terraform,**/mlruns,**/mlartifacts,**/.claude" \
 		--skip-files "**/*.tfstate,**/*.tfstate.*" /repo
