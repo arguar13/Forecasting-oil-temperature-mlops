@@ -59,15 +59,29 @@ module "eks" {
       instance_types = ["t3.large"]
       capacity_type  = "ON_DEMAND"
 
-      # Default del módulo (20GB, ~18GB allocatable) resultó insuficiente:
-      # train_model falló con "No space left on device" instalando PyTorch
-      # -- entre las imágenes ya pulleadas en cada nodo (dlinear-api y
-      # dlinear-mlflow-server, ambas con PyTorch/CUDA, varios GB cada una)
-      # y el propio pip install de este job necesitando espacio de sobra
-      # para las mismas dependencias, 18GB no alcanzaba. Verificado en el
-      # cluster real (`kubectl describe node` -- ephemeral-storage
-      # allocatable ~18181869946 bytes).
-      disk_size = 50
+      # NO usar "disk_size" aquí: el submódulo eks-managed-node-group lo
+      # ignora en silencio cuando usa un custom launch template (nuestro
+      # caso, forzado por otras opciones) -- ver
+      # .terraform/modules/eks/modules/eks-managed-node-group/main.tf:332
+      # ("disk_size = var.use_custom_launch_template ? null : var.disk_size").
+      # Un primer intento con "disk_size = 50" quedó como no-op total: el
+      # nodo real seguía con el volumen raíz de 20GB del AMI por defecto
+      # (verificado con `aws ec2 describe-volumes` sobre una instancia real
+      # -- Size: 20, Device: /dev/xvda -- y una sola versión del launch
+      # template sin BlockDeviceMappings). DiskPressure=True en producción
+      # y jobs de CI fallando con "no space left on device" incluso para
+      # pullear la imagen base python:3.10, no solo instalando PyTorch.
+      # block_device_mappings sí se respeta con custom launch template.
+      block_device_mappings = {
+        xvda = {
+          device_name = "/dev/xvda"
+          ebs = {
+            volume_size           = 50
+            volume_type           = "gp3"
+            delete_on_termination = true
+          }
+        }
+      }
     }
   }
 
