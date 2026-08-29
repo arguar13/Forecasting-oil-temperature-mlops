@@ -67,8 +67,18 @@ resource "aws_iam_openid_connect_provider" "gitlab" {
   # por este apply. prevent_destroy evita que un futuro "terraform destroy"
   # de ESTE proyecto (Fase W) se lleve por delante el OIDC provider que el
   # otro proyecto sigue necesitando.
+  #
+  # ignore_changes = [tags, tags_all]: este resource no declara "tags" (a
+  # propósito, ver arriba), pero el recurso real trae los tags que le puso
+  # el otro proyecto -- sin esto, cada apply intenta "destaguearlo" para
+  # igualarlo a nuestro estado deseado (sin tags), y TerraformCI_OIDC_Role
+  # (con permisos acotados a propósito, ver terraform_ci_iam_scoped más
+  # abajo) no tiene -- ni debería tener -- iam:UntagOpenIDConnectProvider
+  # sobre un recurso que no es completamente nuestro. Dejar la gestión de
+  # tags enteramente al proyecto que sí es dueño del recurso.
   lifecycle {
     prevent_destroy = true
+    ignore_changes  = [tags, tags_all]
   }
 }
 
