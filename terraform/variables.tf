@@ -33,3 +33,18 @@ variable "gitlab_project_path" {
   type        = string
   default     = "personal-group7745334/612-forecasting-oil-temperature-mlops"
 }
+
+# Debe coincidir con operator_user_name en terraform/bootstrap/variables.tf.
+# Usado (no data.aws_caller_identity.current.arn) para el key administrator
+# de la KMS key de EKS en eks.tf -- ese data source es dinámico, cambia
+# según quién corra el apply en ese momento (el usuario operador local, o
+# TerraformCI_OIDC_Role en el pipeline). Usarlo directamente hace que cada
+# apply SOBREESCRIBA la política de la key con la identidad de quien la
+# corrió último, dejando afuera a cualquier otro administrador legítimo --
+# verificado en la cuenta real: un apply del pipeline dejó al usuario
+# operador sin permiso para leer la key que él mismo había creado.
+variable "operator_user_name" {
+  description = "Nombre del usuario IAM operador (Fase L/N) -- administrador estable de la KMS key de EKS"
+  type        = string
+  default     = "dlinear-mlops-admin"
+}

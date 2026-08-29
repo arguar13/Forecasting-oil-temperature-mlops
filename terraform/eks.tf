@@ -23,8 +23,17 @@ module "eks" {
   # key policy nunca delega en IAM (no incluye al account root). Se listan
   # ambos: el operador local (Fase L/N) y el rol de CI, para que cualquiera
   # de los dos pueda leer/administrar la key en applies subsecuentes.
+  #
+  # ARN del operador construido explícitamente, NO
+  # data.aws_caller_identity.current.arn: ese data source es dinámico --
+  # refleja a quien esté corriendo ESTE apply en particular. Usarlo
+  # directamente hacía que cada apply sobreescribiera la política de la key
+  # con la identidad del momento (el operador local en un apply, luego
+  # TerraformCI_OIDC_Role en el siguiente apply del pipeline), dejando al
+  # otro sin acceso -- verificado en la cuenta real: un apply del pipeline
+  # dejó al operador sin poder leer la key que él mismo había creado.
   kms_key_administrators = [
-    data.aws_caller_identity.current.arn,
+    "arn:aws:iam::${data.aws_caller_identity.current.account_id}:user/${var.operator_user_name}",
     aws_iam_role.terraform_ci_role.arn,
   ]
 
@@ -38,7 +47,16 @@ module "eks" {
       max_size     = 10
       desired_size = 3
 
-      instance_types = ["t3.medium", "t3.large"]
+      # t3.medium (primer intento) resultó insuficiente en producción real:
+      # los 3 nodos entraron en MemoryPressure permanente apenas con
+      # ArgoCD + el runner self-hosted (kubernetes/gitlab-runner/) + los
+      # pods efímeros de sus jobs + MLflow + 3 réplicas de la API (con
+      # PyTorch cargado) -- el rolling update de la API nunca lograba
+      # estabilizar un solo pod Ready (kubelet perdía el estado de los
+      # pods bajo presión, "ContainerStatusUnknown" en bucle). Verificado
+      # en el cluster real (`kubectl get nodes` mostraba
+      # MemoryPressure=True en los 3 nodos de forma sostenida).
+      instance_types = ["t3.large"]
       capacity_type  = "ON_DEMAND"
     }
   }
