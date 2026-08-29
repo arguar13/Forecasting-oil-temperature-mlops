@@ -61,6 +61,15 @@ resource "aws_iam_openid_connect_provider" "gitlab" {
   # .gitlab-ci.yml (id_tokens.aud) usa la misma audiencia.
   client_id_list  = ["sts.amazonaws.com"]
   thumbprint_list = [data.tls_certificate.gitlab.certificates[0].sha1_fingerprint]
+
+  # Recurso compartido con otro proyecto (predictive-maintenance-mlops,
+  # ver nota arriba) -- importado a este state (terraform import), no creado
+  # por este apply. prevent_destroy evita que un futuro "terraform destroy"
+  # de ESTE proyecto (Fase W) se lleve por delante el OIDC provider que el
+  # otro proyecto sigue necesitando.
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 # ============================================================
