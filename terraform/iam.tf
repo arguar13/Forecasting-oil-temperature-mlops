@@ -320,6 +320,24 @@ resource "aws_iam_role_policy" "terraform_ci_iam_scoped" {
           "iam:ListInstanceProfilesForRole",
         ]
         Resource = "*"
+      },
+      {
+        # PassRole (distinto de administrar el role en sí, ver el statement
+        # de arriba) -- EKS lo exige al crear/reemplazar el node group, para
+        # poder asignarle este rol a las instancias EC2 que lanza. Mismo
+        # motivo que el statement de solo lectura de arriba: el rol lo
+        # genera el módulo EKS con el prefijo de la clave del node group
+        # ("inference-eks-node-group-...", ver eks.tf), no "dlinear-*".
+        # Nunca se había ejercitado en CI porque el primer apply de este
+        # node group se hizo con credenciales administrativas (Fase N) --
+        # verificado en un apply real: "AccessDeniedException ... not
+        # authorized to perform: iam:PassRole on resource:
+        # .../inference-eks-node-group-...".
+        Effect = "Allow"
+        Action = [
+          "iam:PassRole",
+        ]
+        Resource = "arn:aws:iam::*:role/inference-eks-node-group-*"
       }
     ]
   })
