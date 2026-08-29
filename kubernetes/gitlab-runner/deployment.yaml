@@ -61,6 +61,18 @@ spec:
             - /bin/sh
             - -c
             - |
+              # NO --kubernetes-pod-labels: en gitlab-runner v16.11.2 este
+              # flag no separa "key=value" ni JSON de forma consistente --
+              # probado con "app=gitlab-runner-job" (toda la cadena queda
+              # como nombre de label, valor vacío) y con
+              # '{"app":"gitlab-runner-job"}' (parte en ":", queda
+              # {"app" = "gitlab-runner-job"}"). Ambos producen un nombre de
+              # label inválido para Kubernetes ("metadata.labels: Invalid
+              # value"), y el pod del job (train_model/quality_gate) nunca
+              # arranca. El label era puramente cosmético -- nada en este
+              # repo lo selecciona (namespace/RBAC/NetworkPolicy no lo usan)
+              # -- así que se quita en vez de seguir invirtiendo tiempo en
+              # la sintaxis exacta de un flag roto para un nice-to-have.
               gitlab-runner register \
                 --non-interactive \
                 --url "https://gitlab.com" \
@@ -69,7 +81,6 @@ spec:
                 --kubernetes-namespace "gitlab-runner" \
                 --kubernetes-service-account "gitlab-runner" \
                 --kubernetes-image "python:3.10" \
-                --kubernetes-pod-labels "app=gitlab-runner-job" \
                 --config /etc/gitlab-runner/config.toml
           env:
             - name: RUNNER_TOKEN
