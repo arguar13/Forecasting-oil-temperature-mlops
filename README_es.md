@@ -51,7 +51,7 @@ La plataforma está diseñada desde el primer día bajo principios de Site Relia
 - **Una regresión nunca puede llegar a producción de forma automática.** El quality gate respaldado por MLflow compara cada modelo recién entrenado contra el que sirve tráfico actualmente y bloquea la promoción — y por lo tanto bloquea `build-push`/`deploy` — a menos que el nuevo modelo sea al menos igual de bueno.
 - **Iteración end-to-end completa en segundos, no en horas.** Un dataset "toy" fijo de ~1.000 filas, versionado con DVC, ejercita todo el pipeline — contratos de datos, preprocesamiento, búsqueda de hiperparámetros, entrenamiento, registro en MLflow — en una laptop, sin GPU y sin costo de nube, antes de tocar jamás el dataset completo.
 - **Cero configuración manual para un nuevo colaborador.** Un DevContainer más una réplica completa de la nube en `docker-compose.yml` (PostgreSQL, LocalStack, Kafka, MLflow, la API) hacen que un nuevo ingeniero corra `make up` y sea productivo de inmediato — sin instalar Python localmente, sin credenciales de AWS, sin estado compartido de "en mi máquina funciona".
-- **Nada llega a AWS que no haya pasado antes por una validación local más barata y rápida.** Los git hooks de pre-commit, las pruebas de integración locales basadas en Testcontainers y un runner local de GitLab CI (`gitlab-ci-local`) detectan fallos antes de tocar un solo recurso en la nube.
+- **Nada llega a AWS que no haya pasado antes por una validación local más barata y rápida, y ningún job de CI/CD consume minutos compartidos de GitLab.com.** Los git hooks de pre-commit, las pruebas de integración locales basadas en Testcontainers, un emulador local del pipeline (`gitlab-ci-local`) y dos runners self-hosted (uno en el propio hardware del desarrollador, tag `local-hardware`; otro dentro del cluster EKS, tag `in-vpc`) detectan fallos y ejecutan el pipeline real sin tocar un solo recurso de cómputo compartido de GitLab.
 
 ---
 
@@ -161,7 +161,7 @@ graph TD
 | **GitOps** | ArgoCD | Reconciliación continua del estado del clúster desde Git, con auto-corrección de drift. |
 | **Simulación de Nube Local** | LocalStack, Apache Kafka, Testcontainers | Emulación de S3/SQS/Secrets Manager y pruebas de integración con contenedores efímeros. |
 | **Infraestructura como Código** | Terraform | Aprovisionamiento declarativo de VPC, EKS, RDS, S3, ECR, IAM. |
-| **CI/CD** | GitLab CI/CD, OpenID Connect, gitlab-ci-local | Pipelines autenticados vía OIDC; validación local de jobs del pipeline antes de hacer push. |
+| **CI/CD** | GitLab CI/CD, OpenID Connect, gitlab-ci-local, runners self-hosted (Docker local + EKS) | Pipelines autenticados vía OIDC; validación local de jobs antes de hacer push; ejecución real sin consumir minutos compartidos de GitLab.com. |
 | **Observabilidad y Resiliencia** | structlog, tenacity, pybreaker | Logging estructurado en JSON, reintentos acotados con backoff, circuit breaking. |
 | **Servicios Cloud** | Amazon S3, ECR, RDS PostgreSQL, VPC | Almacenamiento gestionado, registry, base de datos y redes. |
 | **Desarrollo Local** | DevContainers, Poetry, Makefile | Entorno estandarizado, dependencias deterministas, interfaz de ejecución única. |
@@ -303,9 +303,38 @@ make ci                     # todo lo anterior, de una sola vez -- idéntico al 
 
 `pre-commit` (instalado por `make hooks`) impone esto automáticamente: un commit se rechaza si falla el formateo, el linting, el chequeo de tipos, los tests, la sintaxis YAML, o si se detecta un secreto filtrado. Ver [Calidad de Código y Validación Shift-Left](#calidad-de-código-y-validación-shift-left) más abajo.
 
-### 6. Comitear y Desplegar
+### 6. Validar el Pipeline de CI/CD Completo, Localmente
 
-Una vez completada la validación, sube los cambios a GitLab. El pipeline de CI/CD automáticamente corre el mismo quality gate shift-left en cada push, planifica y aplica cambios de infraestructura, entrena y evalúa un nuevo modelo con el quality gate, construye y sube la imagen del contenedor, y — solo en `main` — actualiza el tag de imagen de Kustomize para que ArgoCD pueda reconciliar el clúster.
+Todavía no se sube nada a GitLab. `gitlab-ci-local` lee el mismo `.gitlab-ci.yml` y ejecuta cualquier job dentro de contenedores Docker en esta máquina, byte a byte igual que un runner real — así los errores de sintaxis, imágenes base o `before_script` se detectan y corrigen aquí, sin gastar minutos de CI ni abrir un pipeline roto en GitLab:
+
+```bash
+make ci-local-list             # valida sintaxis/stages/needs de .gitlab-ci.yml, sin ejecutar nada
+make ci-local JOB=python:quality   # corre un job puntual (uso: JOB=<nombre-del-job>)
+```
+
+> En Windows/Git Bash, `make ci-local` ya exporta `MSYS_NO_PATHCONV=1` — sin esto, Git Bash reescribe las rutas internas (`/builds/...`) que `gitlab-ci-local` pasa a `docker create`, y el job falla con `the working directory '...' is invalid` antes de ejecutar una sola línea del script.
+
+### 7. Runner Self-Hosted: el pipeline REAL, sin gastar minutos de GitLab
+
+`gitlab-ci-local` (paso 6) simula el pipeline *antes* del push. Para que GitLab también ejecute el pipeline *real* (el que dispara automáticamente en cada push) sin tocar los runners compartidos de GitLab.com, este mismo hardware se registra como runner self-hosted. Es la misma estrategia que ya usa `kubernetes/gitlab-runner/` para `train_model`/`quality_gate` (tag `in-vpc`, dentro del cluster EKS porque necesita el DNS interno de MLflow) — aquí se extiende con un segundo runner, en tu propio PC, para el resto de los jobs (`local-hardware`): quality, terraform, build-push y deploy.
+
+Bootstrap (una sola vez):
+
+```bash
+# 1. GitLab.com -> proyecto (o grupo) -> Settings -> CI/CD -> Runners -> "New runner"
+#    -> tags: local-hardware -> "Run untagged jobs": No -> copiar el token (glrt-...)
+make runner-register TOKEN=glrt-xxxxx   # registra este PC (token queda solo en un volumen Docker, nunca en Git)
+make runner-up                          # lo deja corriendo 24/7 (--restart always)
+make runner-status                      # confirma que quedó conectado ("is alive")
+```
+
+A partir de aquí, cada push a GitLab despacha el pipeline completo a runners que corren en tu propia infraestructura (este PC + el pod dentro de EKS) — el contador de minutos compartidos de GitLab.com no se mueve. La autenticación contra AWS sigue siendo OIDC de corta duración (`.aws-auth`/`.aws-auth-terraform` en `.gitlab-ci.yml`); mover un job de runner nunca implica volver a credenciales estáticas.
+
+`make runner-logs` sigue en vivo qué job está corriendo; `make runner-down` detiene el contenedor sin perder el registro (para volver a levantarlo con `make runner-up`).
+
+### 8. Comitear y Desplegar
+
+Una vez completada la validación local (pasos 5-6) y con el runner self-hosted activo (paso 7), sube los cambios a GitLab. El pipeline de CI/CD automáticamente corre el mismo quality gate shift-left en cada push, planifica y aplica cambios de infraestructura, entrena y evalúa un nuevo modelo con el quality gate, construye y sube la imagen del contenedor, y — solo en `main` — actualiza el tag de imagen de Kustomize para que ArgoCD pueda reconciliar el clúster.
 
 ---
 

@@ -157,6 +157,35 @@ services:
       retries: 15
       start_period: 20s
 
+  # Entrenamiento local (Fase E) -- corre en Linux, igual que el job
+  # "train_model" de CI (.gitlab-ci.yml), para que MLflow persista rutas de
+  # artefacto con "/" en vez del separador nativo del host (ver
+  # core_ml/train.Dockerfile). No arranca con "make up"/"docker compose up"
+  # (profile "tools", excluido por defecto) -- se invoca puntualmente con
+  # "docker compose run --rm trainer ..." (ver Makefile::train-toy/quality-gate).
+  trainer:
+    profiles: ["tools"]
+    build:
+      context: .
+      dockerfile: core_ml/train.Dockerfile
+    volumes:
+      - ./core_ml:/workspace
+      # "pip install -r requirements.txt" corre en cada `docker compose run`
+      # (ver train-entrypoint.sh) -- cachear aquí evita re-descargar ~2GB de
+      # wheels (torch, cuda) en cada invocación; solo la primera corrida es
+      # lenta.
+      - trainer_pip_cache:/root/.cache/pip
+    environment:
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test  # pragma: allowlist secret -- credencial fija de LocalStack, nunca se usa fuera del stack local
+      AWS_DEFAULT_REGION: us-east-1
+      MLFLOW_S3_ENDPOINT_URL: http://localstack:4566
+    depends_on:
+      mlflow:
+        condition: service_healthy
+
 volumes:
   pgdata:
   localstack_data:
+  trainer_pip_cache:

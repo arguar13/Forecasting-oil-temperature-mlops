@@ -2,6 +2,21 @@
 #
 # Variables de proyecto/grupo requeridas en GitLab (Settings > CI/CD > Variables),
 # no definidas aquí por diseño: AWS_ACCOUNT_ID.
+#
+# Runners: TODOS los jobs de este pipeline corren en runners self-hosted --
+# cero minutos compartidos de GitLab.com se consumen jamás. Dos runners,
+# dos tags, cada uno por una razón técnica distinta (nunca por preferencia):
+#   - `local-hardware`: contenedor Docker en el hardware del propio
+#     desarrollador (ver `make runner-register` / `make runner-up` en el
+#     Makefile). Ejecuta todo lo que NO necesita resolver DNS interno del
+#     cluster: validate/quality/plan/apply/build-push/deploy.
+#   - `in-vpc`: pod dentro del cluster EKS (kubernetes/gitlab-runner/).
+#     Ejecuta exclusivamente train_model/quality_gate, que necesitan
+#     alcanzar el Service ClusterIP interno de MLflow -- inalcanzable desde
+#     cualquier máquina fuera de la VPC, incluida la del desarrollador.
+# La autenticación contra AWS (.aws-auth / .aws-auth-terraform, más abajo)
+# sigue siendo OIDC de corta duración en ambos runners -- mover un job de
+# runner nunca implica bajar a credenciales estáticas de larga duración.
 variables:
   AWS_REGION: "us-east-1"
   ECR_REPOSITORY: "dlinear-forecast-api"
@@ -102,6 +117,7 @@ stages:
 # fallaba con 'Terraform has no command named "sh"'.
 terraform:fmt:
   stage: validate
+  tags: ["local-hardware"]
   image:
     name: hashicorp/terraform:1.15.9
     entrypoint: [""]
@@ -117,6 +133,7 @@ terraform:fmt:
 # antes de hacer commit (vía pre-commit) o de abrir un MR.
 python:quality:
   stage: quality
+  tags: ["local-hardware"]
   image: python:3.10
   cache:
     key: "poetry-$CI_COMMIT_REF_SLUG"
@@ -131,9 +148,19 @@ python:quality:
 
 security:trivy:
   stage: quality
+  tags: ["local-hardware"]
   image: docker:24.0.5
   services:
     - docker:24.0.5-dind
+  # Sin esto, el dind por defecto levanta TLS en el puerto 2376 (certs en
+  # /certs) y el cliente `docker` de este job -- que no monta esos certs --
+  # intenta el socket unix por defecto, que no existe en esta imagen:
+  # "Cannot connect to the Docker daemon". Detectado corriendo este job
+  # con `gitlab-ci-local --privileged` antes de hacer push (ver
+  # integration_tests, que ya usa este mismo patrón).
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_TLS_CERTDIR: ""
   script:
     - docker run --rm -v "$CI_PROJECT_DIR":/repo aquasec/trivy:latest fs
         --exit-code 1 --severity HIGH,CRITICAL --ignorefile /repo/.trivyignore
@@ -150,7 +177,15 @@ security:trivy:
 # Kafka, MLflow y la API se integran correctamente antes de tocar AWS real.
 integration_tests:
   stage: quality
-  image: docker:24.0.5
+  tags: ["local-hardware"]
+  # NO docker:24.0.5 (Alpine/musl): el lockfile de core_ml instala torch, y
+  # su build de Linux en PyPI trae dependencias CUDA (cuda-bindings,
+  # nvidia-*) sin wheels musllinux -- "ERROR: No matching distribution
+  # found for cuda-bindings==... (from versions: none)" instalando sobre
+  # Python de Alpine. python:3.10 (Debian/glibc) sí resuelve esos wheels;
+  # el cliente de Docker se instala vía apt para seguir hablándole al
+  # servicio docker:24.0.5-dind de abajo.
+  image: python:3.10
   services:
     - docker:24.0.5-dind
   variables:
@@ -158,17 +193,39 @@ integration_tests:
     DOCKER_TLS_CERTDIR: ""
   allow_failure: true
   before_script:
-    - apk add --no-cache python3 py3-pip
-    - python3 -m venv /venv
-    - . /venv/bin/activate
-    - pip install --no-cache-dir poetry==1.8.3
-    - cd core_ml && poetry install --sync --no-interaction
+    # "docker.io" (repo de Debian) instala el DAEMON (dockerd) pero no el
+    # cliente -- Debian lo separó en el paquete "docker-cli", que a su vez
+    # no trae el plugin de "docker compose" (v2) que usa testcontainers
+    # (ver testcontainers.compose.DockerCompose::compose_command_property,
+    # invoca ["docker", "compose", ...], no el binario standalone
+    # "docker-compose" v1). El repo oficial de Docker sí empaqueta cliente +
+    # plugin juntos y consistentes entre sí -- se agrega igual que documenta
+    # docs.docker.com/engine/install/debian/.
+    - install -m 0755 -d /etc/apt/keyrings
+    - curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
+    - chmod a+r /etc/apt/keyrings/docker.asc
+    - echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian $(. /etc/os-release && echo $VERSION_CODENAME) stable" > /etc/apt/sources.list.d/docker.list
+    # DEBIAN_FRONTEND=noninteractive: sin esto, debconf escribe ruido a
+    # stderr ("unable to initialize frontend") en una imagen sin tty --
+    # inofensivo por sí solo, pero ese stderr hacía que gitlab-ci-local (con
+    # reintentos en varias líneas) diera el job por terminado antes de
+    # llegar al resto del script.
+    - DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends docker-ce-cli docker-compose-plugin
+    # "poetry install" del lockfile de core_ml muere de forma silenciosa e
+    # intermitente en este runner (ver Makefile::install-core-ml-ci) --
+    # "poetry export" + pip evita la ruta de código rota sin perder el
+    # pineado exacto del lockfile.
+    - pip install --no-cache-dir poetry==1.8.3 poetry-plugin-export==1.8.0
+    - cd core_ml && poetry export -f requirements.txt --without-hashes -o /tmp/requirements.txt --with dev
+    - pip install --no-cache-dir -r /tmp/requirements.txt
   script:
-    - . /venv/bin/activate
-    - cd core_ml && poetry run pytest -m integration --no-cov tests/integration
+    # Ya estamos en core_ml/ (el "cd core_ml" de "poetry export" en
+    # before_script persiste dentro del mismo contenedor del job).
+    - pytest -m integration --no-cov tests/integration
 
 terraform:plan:
   stage: plan
+  tags: ["local-hardware"]
   extends: .aws-auth-terraform
   image:
     name: hashicorp/terraform:1.15.9
@@ -186,6 +243,7 @@ terraform:plan:
 
 terraform:apply:
   stage: apply
+  tags: ["local-hardware"]
   extends: .aws-auth-terraform
   image:
     name: hashicorp/terraform:1.15.9
@@ -214,14 +272,21 @@ train_model:
   variables:
     CONTAINER_IMAGE_TAG: "$CI_COMMIT_SHA"
   script:
-    - pip install --no-cache-dir poetry==1.8.3
-    - make install-core-ml
+    # "poetry install" del lockfile de core_ml muere de forma silenciosa e
+    # intermitente en este runner (self-hosted, mismo host que ve esta
+    # flakiness en local -- ver Makefile::install-core-ml-ci) -- "poetry
+    # export" + pip evita la ruta de código rota sin perder el pineado
+    # exacto del lockfile. Tampoco depende de "make" (python:3.10 no lo
+    # trae preinstalado).
+    - pip install --no-cache-dir poetry==1.8.3 poetry-plugin-export==1.8.0
+    - cd core_ml && poetry export -f requirements.txt --without-hashes -o /tmp/requirements.txt --with dev
+    - pip install --no-cache-dir -r /tmp/requirements.txt
     # DVC descarga el dataset versionado desde S3 (requiere credenciales de .aws-auth)
-    - cd core_ml && poetry run dvc pull data/raw/ETTh1.csv.dvc
+    - dvc pull data/raw/ETTh1.csv.dvc
     # FAIL FAST: valida el contrato de datos y genera los tensores de entrenamiento
-    - poetry run python -m src.data_processing --dataset raw
+    - python -m src.data_processing --dataset raw
     # Entrena, registra en MLflow (métricas, tags de reproducibilidad, modelo empaquetado)
-    - poetry run python -m src.train --dataset raw
+    - python -m src.train --dataset raw
   rules:
     - if: $CI_COMMIT_BRANCH == "main"
 
@@ -233,11 +298,14 @@ quality_gate:
   # MLFLOW_TRACKING_URI) -- mismo runner self-hosted que train_model.
   tags: ["in-vpc"]
   script:
-    - pip install --no-cache-dir poetry==1.8.3
-    - make install-core-ml
+    - pip install --no-cache-dir poetry==1.8.3 poetry-plugin-export==1.8.0
+    - cd core_ml && poetry export -f requirements.txt --without-hashes -o /tmp/requirements.txt --with dev
+    - pip install --no-cache-dir -r /tmp/requirements.txt
     # Bloquea el pipeline (build-push/deploy nunca corren) si el modelo recién
-    # entrenado no supera a la versión actualmente en producción.
-    - cd core_ml && poetry run python -m src.quality_gate
+    # entrenado no supera a la versión actualmente en producción. Ya estamos
+    # en core_ml/ (el "cd core_ml" de la línea de "poetry export" de arriba
+    # persiste dentro del mismo script de CI).
+    - python -m src.quality_gate
   rules:
     - if: $CI_COMMIT_BRANCH == "main"
 
@@ -246,10 +314,16 @@ quality_gate:
 # ========================
 docker:build-push:
   stage: build-push
+  tags: ["local-hardware"]
   extends: .aws-auth
   image: docker:24.0.5
   services:
     - docker:24.0.5-dind
+  # Ver el comentario equivalente en security:trivy -- sin esto, el cliente
+  # docker de este job no puede hablarle al dind por defecto (TLS en 2376).
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_TLS_CERTDIR: ""
   script:
     - apk add --no-cache aws-cli
     - aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
@@ -270,10 +344,16 @@ docker:build-push:
 # docker-compose.yml en local, ahora también publicado para EKS.
 docker:build-push-mlflow:
   stage: build-push
+  tags: ["local-hardware"]
   extends: .aws-auth
   image: docker:24.0.5
   services:
     - docker:24.0.5-dind
+  # Ver el comentario equivalente en security:trivy -- sin esto, el cliente
+  # docker de este job no puede hablarle al dind por defecto (TLS en 2376).
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_TLS_CERTDIR: ""
   script:
     - apk add --no-cache aws-cli
     - aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
@@ -291,6 +371,7 @@ docker:build-push-mlflow:
 # ========================
 kubernetes:deploy:
   stage: deploy
+  tags: ["local-hardware"]
   image: python:3.10
   needs: ["docker:build-push", "docker:build-push-mlflow"]
   before_script:

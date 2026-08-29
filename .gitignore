@@ -78,3 +78,11 @@ Thumbs.db
 # Salida generada por `gitlab-ci-local` (make ci-local / ci-local-list):
 # el YAML expandido, no una fuente de verdad versionada.
 .gitlab-ci-local/
+
+# ========================
+# Docker Compose (Fase 3)
+# ========================
+# Anulación de puertos por máquina (docker compose la mezcla automáticamente
+# con docker-compose.yml): no es una fuente de verdad del proyecto, solo
+# evita colisiones de puertos con otros stacks corriendo en un equipo dado.
+docker-compose.override.yml
