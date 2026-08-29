@@ -22,6 +22,12 @@ variables:
   ECR_REPOSITORY: "dlinear-forecast-api"
   TF_ROOT: "terraform"
   PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
+  # poetry NO respeta PIP_CACHE_DIR -- tiene su propio cache de paquetes,
+  # separado del de pip (por defecto en el $HOME del contenedor, efímero).
+  # Sin esto, "poetry install" (python:quality::make install) re-descarga
+  # ~100 paquetes -- torch incluido -- en cada corrida del pipeline, aunque
+  # el "cache:" de abajo esté declarado.
+  POETRY_CACHE_DIR: "$CI_PROJECT_DIR/.cache/poetry"
   # MLflow (kubernetes/base/mlflow.yaml) es un Service ClusterIP -- solo
   # resoluble DENTRO del cluster. Valor fijo (no una variable de proyecto)
   # porque train_model y quality_gate corren en el runner self-hosted
@@ -135,10 +141,17 @@ python:quality:
   stage: quality
   tags: ["local-hardware"]
   image: python:3.10
+  variables:
+    # Igual que POETRY_CACHE_DIR: pre-commit tiene su propio cache de
+    # entornos de hooks (~/.cache/pre-commit por defecto, efímero), y
+    # "make ci" corre "pre-commit run yamllint/detect-secrets".
+    PRE_COMMIT_HOME: "$CI_PROJECT_DIR/.cache/pre-commit"
   cache:
     key: "poetry-$CI_COMMIT_REF_SLUG"
     paths:
       - .cache/pip
+      - .cache/poetry
+      - .cache/pre-commit
   before_script:
     - apt-get update && apt-get install -y --no-install-recommends make git
     - pip install --no-cache-dir poetry==1.8.3 pre-commit
@@ -192,6 +205,13 @@ integration_tests:
     DOCKER_HOST: tcp://docker:2375
     DOCKER_TLS_CERTDIR: ""
   allow_failure: true
+  # Mismas dependencias que train_model/quality_gate (core_ml completo, con
+  # dev group) -- comparten cache key para no descargar 3 veces los mismos
+  # ~2GB de wheels (torch, cuda) entre estos 3 jobs.
+  cache:
+    key: "pip-core-ml-$CI_COMMIT_REF_SLUG"
+    paths:
+      - .cache/pip
   before_script:
     # "docker.io" (repo de Debian) instala el DAEMON (dockerd) pero no el
     # cliente -- Debian lo separó en el paquete "docker-cli", que a su vez
@@ -328,8 +348,17 @@ docker:build-push:
     - apk add --no-cache aws-cli
     - aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
     - ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+    # Cache de capas entre corridas: el repo ECR es inmutable (no hay tag
+    # ":latest" flotante para usar como cache-from directo, ver nota abajo),
+    # así que se resuelve dinámicamente cuál fue el último tag (SHA) subido
+    # y se lo trae como fuente de cache -- evita reinstalar PyTorch/Poetry
+    # desde cero en cada pipeline cuando esas capas no cambiaron. Si todavía
+    # no hay ninguna imagen publicada (primer deploy), el pull/build siguen
+    # funcionando igual, solo sin cache.
+    - PREVIOUS_TAG=$(aws ecr describe-images --repository-name $ECR_REPOSITORY --region $AWS_REGION --query 'sort_by(imageDetails,& imagePushedAt)[-1].imageTags[0]' --output text 2>/dev/null || true)
+    - if [ -n "$PREVIOUS_TAG" ] && [ "$PREVIOUS_TAG" != "None" ]; then docker pull "$ECR_REGISTRY/$ECR_REPOSITORY:$PREVIOUS_TAG" || true; fi
     # Construcción leyendo el Dockerfile de la raíz, el cual copia la carpeta api/
-    - docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$CI_COMMIT_SHA -f Dockerfile .
+    - docker build --cache-from "$ECR_REGISTRY/$ECR_REPOSITORY:$PREVIOUS_TAG" -t $ECR_REGISTRY/$ECR_REPOSITORY:$CI_COMMIT_SHA -f Dockerfile .
     - docker push $ECR_REGISTRY/$ECR_REPOSITORY:$CI_COMMIT_SHA
     # Sin tag `:latest`: el repo ECR es IMMUTABLE (terraform/ecr.tf) y cada
     # despliegue queda atado a un SHA exacto, trazable y reproducible --
@@ -358,7 +387,11 @@ docker:build-push-mlflow:
     - apk add --no-cache aws-cli
     - aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
     - ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
-    - docker build -t $ECR_REGISTRY/dlinear-mlflow-server:$CI_COMMIT_SHA -f mlflow.Dockerfile .
+    # Ver el comentario equivalente en docker:build-push -- misma estrategia
+    # de cache contra un repo ECR inmutable.
+    - PREVIOUS_TAG=$(aws ecr describe-images --repository-name dlinear-mlflow-server --region $AWS_REGION --query 'sort_by(imageDetails,& imagePushedAt)[-1].imageTags[0]' --output text 2>/dev/null || true)
+    - if [ -n "$PREVIOUS_TAG" ] && [ "$PREVIOUS_TAG" != "None" ]; then docker pull "$ECR_REGISTRY/dlinear-mlflow-server:$PREVIOUS_TAG" || true; fi
+    - docker build --cache-from "$ECR_REGISTRY/dlinear-mlflow-server:$PREVIOUS_TAG" -t $ECR_REGISTRY/dlinear-mlflow-server:$CI_COMMIT_SHA -f mlflow.Dockerfile .
     - docker push $ECR_REGISTRY/dlinear-mlflow-server:$CI_COMMIT_SHA
   rules:
     - if: $CI_COMMIT_BRANCH == "main"
