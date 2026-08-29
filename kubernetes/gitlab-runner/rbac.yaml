@@ -18,6 +18,13 @@ rules:
   - apiGroups: [""]
     resources: ["pods/exec"]
     verbs: ["create"]
+  # gitlab-runner 16.x usa la "attach strategy" por defecto para
+  # streamear la salida de los jobs (attach a un contenedor ya corriendo,
+  # distinto de pods/exec que abre un proceso nuevo) -- sin esto todo job
+  # se queda pegado en "Pending" hasta timeout: "pods/attach is forbidden".
+  - apiGroups: [""]
+    resources: ["pods/attach"]
+    verbs: ["create", "get"]
   - apiGroups: [""]
     resources: ["pods/log"]
     verbs: ["get"]
