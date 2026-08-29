@@ -58,6 +58,16 @@ module "eks" {
       # MemoryPressure=True en los 3 nodos de forma sostenida).
       instance_types = ["t3.large"]
       capacity_type  = "ON_DEMAND"
+
+      # Default del módulo (20GB, ~18GB allocatable) resultó insuficiente:
+      # train_model falló con "No space left on device" instalando PyTorch
+      # -- entre las imágenes ya pulleadas en cada nodo (dlinear-api y
+      # dlinear-mlflow-server, ambas con PyTorch/CUDA, varios GB cada una)
+      # y el propio pip install de este job necesitando espacio de sobra
+      # para las mismas dependencias, 18GB no alcanzaba. Verificado en el
+      # cluster real (`kubectl describe node` -- ephemeral-storage
+      # allocatable ~18181869946 bytes).
+      disk_size = 50
     }
   }
 
