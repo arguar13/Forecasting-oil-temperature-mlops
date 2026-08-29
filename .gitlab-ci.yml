@@ -283,6 +283,15 @@ terraform:plan:
     paths:
       - $TF_ROOT/tfplan
     expire_in: 1 hour
+  # Sin esto, plan/apply corrían en TODOS los pushes a main, incluso los
+  # que solo tocan código de la app -- terraform/ no cambió, pero igual
+  # se pagaban ~5 min de plan+apply (que además hoy hacen falta reintentos
+  # por demoras de propagación de IAM, ver terraform:apply). "changes:"
+  # es casi gratis (un diff de nombres de archivo contra el commit
+  # anterior, no clona ni ejecuta nada de más).
+  rules:
+    - changes:
+        - terraform/**/*
 
 terraform:apply:
   stage: apply
@@ -302,6 +311,22 @@ terraform:apply:
     - terraform apply -auto-approve tfplan
   rules:
     - if: $CI_COMMIT_BRANCH == "main"
+      changes:
+        - terraform/**/*
+  # Reintenta ante fallos transitorios de propagación de IAM: un permiso
+  # nuevo (ver terraform_ci_iam_scoped en iam.tf) puede tardar unos
+  # segundos en propagarse a los demás endpoints de AWS, y un recurso que
+  # lo necesita (ej. EKS creando un node group con PassRole) puede
+  # rechazarse aunque la política ya se haya aplicado con éxito segundos
+  # antes -- verificado en un apply real (AccessDeniedException con la
+  # política ya "Modifications complete"). Un depends_on/time_sleep
+  # explícito en el módulo de EKS terminó rompiendo la resolución interna
+  # de un for_each del propio módulo ("Invalid for_each argument": claves
+  # que dependen de valores que ya no se conocían en el plan) -- reintentar
+  # el job completo es más robusto que pelear con el for_each interno de
+  # un módulo de terceros, y para cuando corre el reintento ya pasó tiempo
+  # real de sobra para que IAM haya propagado el cambio.
+  retry: 2
 
 # ========================
 # ML Pipeline (Core ML)
