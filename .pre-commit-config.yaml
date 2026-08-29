@@ -51,10 +51,18 @@ repos:
     hooks:
       - id: detect-secrets
         args: ["--baseline", ".secrets.baseline"]
+        # kubernetes/overlays/.../kustomization.yaml: "images: newTag: <sha>"
+        # es exactamente lo que kubernetes:deploy (.gitlab-ci.yml) comitea en
+        # CADA push a main vía "kustomize edit set image" -- un SHA de Git de
+        # 40 caracteres hex es indistinguible de un secreto de alta entropía
+        # para este scanner. No es un secreto (el tag de imagen es público,
+        # visible en ECR); no tiene sentido re-auditar un falso positivo
+        # nuevo en cada deploy.
         exclude: >
           (?x)^(
             .*\.lock|
-            .*\.dvc
+            .*\.dvc|
+            kubernetes/overlays/.*/kustomization\.yaml
           )$
 
   # ---------------------------------------------------------
