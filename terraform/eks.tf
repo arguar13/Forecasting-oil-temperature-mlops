@@ -1,6 +1,23 @@
+# Sin esto, Terraform corre en paralelo (sin dependencia inferida entre
+# ambos recursos) la actualización de terraform_ci_iam_scoped (agrega
+# iam:PassRole, ver iam.tf) y la creación/reemplazo del node group de EKS
+# que necesita ese permiso -- verificado en un apply real: el permiso se
+# aplicó con éxito (Modifications complete) menos de un segundo antes de
+# que EKS rechazara el CreateNodegroup con AccessDenied, porque IAM todavía
+# no había propagado el cambio de política a los demás endpoints de AWS.
+# El propio módulo EKS ya usa este mismo patrón (time_sleep.this) para un
+# problema de propagación equivalente con el OIDC provider, así que no es
+# una solución ad-hoc para este proyecto.
+resource "time_sleep" "wait_for_terraform_ci_pass_role" {
+  depends_on      = [aws_iam_role_policy.terraform_ci_iam_scoped]
+  create_duration = "15s"
+}
+
 module "eks" {
   source  = "terraform-aws-modules/eks/aws"
   version = "19.16.0"
+
+  depends_on = [time_sleep.wait_for_terraform_ci_pass_role]
 
   cluster_name = "${var.project_name}-eks"
   # 1.30 salió de soporte extendido en AWS (el AMI administrado dejó de
