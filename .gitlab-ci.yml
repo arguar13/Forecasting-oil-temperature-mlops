@@ -262,7 +262,10 @@ integration_tests:
     # pineado exacto del lockfile.
     - pip install --no-cache-dir poetry==1.8.3 poetry-plugin-export==1.8.0
     - cd core_ml && poetry export -f requirements.txt --without-hashes -o /tmp/requirements.txt --with dev
-    - pip install --no-cache-dir -r /tmp/requirements.txt
+    # --timeout 120 (default de pip: 15s): "Read timed out" real bajando
+    # torch bajo contención de este host (verificado en un job real de
+    # docker:build-push -- mismo riesgo aquí, mismas dependencias).
+    - pip install --no-cache-dir --timeout 120 -r /tmp/requirements.txt
   script:
     # Ya estamos en core_ml/ (el "cd core_ml" de "poetry export" en
     # before_script persiste dentro del mismo contenedor del job).
@@ -361,7 +364,10 @@ train_model:
     # transitivas) no hacen falta acá, solo alargan el install.
     - pip install --no-cache-dir poetry==1.8.3 poetry-plugin-export==1.8.0
     - cd core_ml && poetry export -f requirements.txt --without-hashes -o /tmp/requirements.txt --only main
-    - pip install --no-cache-dir -r /tmp/requirements.txt
+    # --timeout 120 (default de pip: 15s): "Read timed out" real bajando
+    # torch bajo contención de este host (verificado en un job real de
+    # docker:build-push -- mismo riesgo aquí, mismas dependencias).
+    - pip install --no-cache-dir --timeout 120 -r /tmp/requirements.txt
     # DVC descarga el dataset versionado desde S3 (requiere credenciales de .aws-auth)
     - dvc pull data/raw/ETTh1.csv.dvc
     # FAIL FAST: valida el contrato de datos y genera los tensores de entrenamiento
@@ -382,7 +388,10 @@ quality_gate:
     # --only main: mismo motivo que en train_model, este job tampoco corre tests.
     - pip install --no-cache-dir poetry==1.8.3 poetry-plugin-export==1.8.0
     - cd core_ml && poetry export -f requirements.txt --without-hashes -o /tmp/requirements.txt --only main
-    - pip install --no-cache-dir -r /tmp/requirements.txt
+    # --timeout 120 (default de pip: 15s): "Read timed out" real bajando
+    # torch bajo contención de este host (verificado en un job real de
+    # docker:build-push -- mismo riesgo aquí, mismas dependencias).
+    - pip install --no-cache-dir --timeout 120 -r /tmp/requirements.txt
     # Bloquea el pipeline (build-push/deploy nunca corren) si el modelo recién
     # entrenado no supera a la versión actualmente en producción. Ya estamos
     # en core_ml/ (el "cd core_ml" de la línea de "poetry export" de arriba

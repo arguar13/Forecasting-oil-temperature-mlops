@@ -7,6 +7,8 @@
 # horneado en la imagen; el volumen de cache de pip hace que solo la primera
 # corrida sea lenta.
 set -e
+# --timeout 120 (default de pip: 15s): ver Dockerfile (imagen de la API) --
+# mismo host, mismo riesgo de "Read timed out" bajando torch bajo contención.
 poetry export -f requirements.txt --without-hashes -o /tmp/requirements.txt --only main
-pip install --no-cache-dir -q -r /tmp/requirements.txt
+pip install --no-cache-dir --timeout 120 -q -r /tmp/requirements.txt
 exec "$@"

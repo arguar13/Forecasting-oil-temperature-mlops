@@ -19,8 +19,17 @@ COPY api/pyproject.toml api/poetry.lock ./
 # torch/DVC traen dependencias con C-extensions que disparan el mismo bug
 # del instalador de poetry en Linux/Docker Desktop). Mismo fix aquí: exportar
 # a requirements.txt y usar pip, que sí resuelve estable.
+#
+# --timeout 120 (default de pip: 15s): con ese fix aplicado, el build real
+# siguiente falló igual, pero con un error distinto y explícito esta vez --
+# "ReadTimeoutError: HTTPSConnectionPool(host='files.pythonhosted.org', ...)
+# Read timed out" bajando un wheel grande (torch) bajo contención del host
+# (verificado en el trace real del job). 15s alcanza en una red normal, no
+# en este host compartido con otros 2 proyectos corriendo contenedores en
+# paralelo -- pip ya reintenta solo (5 veces por defecto), lo que faltaba
+# era margen por intento.
 RUN poetry export -f requirements.txt --without-hashes -o requirements.txt --only main \
-    && pip install --no-cache-dir -r requirements.txt \
+    && pip install --no-cache-dir --timeout 120 -r requirements.txt \
     && rm requirements.txt
 
 # Copiar la API
