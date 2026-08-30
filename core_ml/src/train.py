@@ -1,7 +1,9 @@
 import argparse
 import os
+import random
 
 import mlflow
+import numpy as np
 import optuna
 import torch
 import torch.nn as nn
@@ -18,6 +20,22 @@ logger = get_logger(__name__)
 # Configuración del dispositivo (GPU o CPU)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 torch.backends.cudnn.benchmark = True
+
+# Sin esto, dos corridas con el MISMO lr (init de pesos vía torch, shuffling
+# del DataLoader de train, y la propia búsqueda de Optuna) producían
+# métricas finales distintas -- verificado en el registro real de MLflow:
+# la v2 (production, best_lr=0.00173, final_val_mse=0.00468) y la v4
+# (candidata, best_lr=0.00153, final_val_mse=0.00593) usaron learning
+# rates casi idénticos pero terminaron ~26% distintas, y quality_gate
+# rechazó v4 por eso. Fijar la semilla no garantiza que un candidato
+# futuro le gane a producción, pero hace que la MISMA corrida (mismo
+# commit, mismos datos) sea reproducible en vez de variar por azar en
+# cada ejecución del pipeline -- una corrida de train_model, dos veces,
+# debe dar el mismo resultado.
+SEED = 42
+random.seed(SEED)
+np.random.seed(SEED)
+torch.manual_seed(SEED)
 
 DEFAULT_REGISTERED_MODEL_NAME = "dlinear-ett-forecaster"
 DVC_FILE_BY_DATASET = {
@@ -79,7 +97,9 @@ class ModelTrainer:
 
             return val_loss / len(self.val_loader)
 
-        study = optuna.create_study(direction="minimize")
+        study = optuna.create_study(
+            direction="minimize", sampler=optuna.samplers.TPESampler(seed=SEED)
+        )
         study.optimize(objective, n_trials=n_trials)
         best_lr = float(study.best_params["lr"])
         logger.info(f"Mejor Learning Rate encontrado: {best_lr:.5f}")
