@@ -52,6 +52,7 @@ The platform is designed around Site Reliability Engineering principles from day
 - **Full end-to-end iteration in seconds, not hours.** A fixed, DVC-versioned ~1,000-row toy dataset exercises the entire pipeline — data contracts, preprocessing, hyperparameter search, training, MLflow registration — on a laptop, with no GPU and no cloud cost, before the full dataset is ever touched.
 - **Zero manual setup for a new contributor.** A DevContainer plus a `docker-compose.yml` replica of the whole cloud stack (PostgreSQL, LocalStack, Kafka, MLflow, the API) means a new engineer runs `make up` and is productive immediately — no local Python installation, no AWS credentials, no shared "works on my machine" state.
 - **Nothing reaches AWS that hasn't already passed a cheaper, faster, local gate first, and no CI/CD job consumes GitLab.com's shared-runner minutes.** Pre-commit hooks, local Testcontainers-based integration tests, a local pipeline emulator (`gitlab-ci-local`), and two self-hosted runners (one on the developer's own hardware, tag `local-hardware`; another inside the EKS cluster, tag `in-vpc`) catch failures and run the real pipeline without touching a single shared GitLab compute resource.
+- **A real 48-hour forecast, not a one-step lookup.** The model predicts the next 48 hourly oil-temperature readings from the last 48 — one of the standard DLinear-paper horizons for this exact dataset — instead of a single next-reading prediction, which on this series is close to indistinguishable from a naive "next reading equals the last one" baseline and would prove little about the model's actual forecasting ability.
 
 ---
 
@@ -143,7 +144,7 @@ graph TD
 2. **Feature engineering.** `data_processing.py` derives temporal features (month, day, hour), scales the series, and builds sliding windows for the DLinear model.
 3. **Training.** `train.py` runs an Optuna hyperparameter search, trains the DLinear network, and logs metrics, parameters, and reproducibility tags to MLflow — bundling the trained network together with its input/output scalers into a single custom `pyfunc` model.
 4. **Registration & quality gate.** The trained model is registered in the MLflow Model Registry. `quality_gate.py` only advances the `production` alias if the candidate is at least as good as the current production model.
-5. **Serving.** The API and the batch CronJob both resolve the model by `name@production_alias` from the registry at startup — never from a file path — and serve online predictions or write batch predictions back to S3, respectively.
+5. **Serving.** The API and the batch CronJob both resolve the model by `name@production_alias` from the registry at startup — never from a file path — and serve online predictions or write batch predictions back to S3, respectively. `POST /predict` returns `predictions`, a 48-value list (one per forecasted hour); batch scoring writes one `Prediction_h1..Prediction_hN` column pair per row for the same horizon.
 6. **Deployment.** CI builds and pushes the container image, then edits the Kustomize overlay's image tag and commits it to `main`. ArgoCD detects the change in Git and reconciles the cluster — CI itself never touches the cluster's API server.
 
 ---
@@ -381,7 +382,7 @@ The `Makefile` (`make help` lists every target) is the single interface for all 
 ├── Makefile                       # Single execution interface -- local == CI
 ├── terraform/                     # IaC definitions (AWS)
 │   ├── ecr.tf                     # Container registry and retention policies
-│   ├── eks.tf                     # Kubernetes v1.30 cluster setup with OIDC/IRSA
+│   ├── eks.tf                     # Kubernetes v1.36 cluster setup with OIDC/IRSA
 │   ├── iam.tf                     # IAM roles and service accounts
 │   ├── provider.tf                # AWS configuration and S3 backend state
 │   ├── rds.tf                     # PostgreSQL backend with zero-trust SG
@@ -438,6 +439,8 @@ Every non-obvious choice below was made deliberately, with an explicit trade-off
 **GitOps (ArgoCD, pull-based) over CI pushing to the cluster.** If CI held `kubectl` credentials to the production cluster, a compromised pipeline (or a bad script) could mutate the cluster directly and invisibly. With ArgoCD, CI's blast radius is limited to committing a file to Git; only ArgoCD, running inside the cluster with its own scoped access, is ever allowed to mutate cluster state — and any manual drift is auto-reverted (`selfHeal: true`).
 
 **Kustomize over Helm.** This project has one application with one legitimate per-environment difference (the image tag and a couple of account-specific values). Kustomize's patch-based, template-free model is a better fit than introducing a full templating engine and chart-versioning story for a single overlay; Helm becomes the better trade-off once there are multiple environments or the need to distribute the chart externally.
+
+**CPU-only PyTorch wheel over the default CUDA build.** No node in this cluster has a GPU (the inference node group is `t3.large`), and `train.py` already resolves the compute device at runtime (`torch.device("cuda" if torch.cuda.is_available() else "cpu")`), so a GPU would be used automatically if one were ever available — but the *default* PyPI `torch` wheel bundles the full CUDA runtime (several GB of `nvidia-*` packages) regardless, dead weight that never executes on this infrastructure. Pinning `torch` to PyTorch's own CPU-only wheel index (`api/pyproject.toml`, `core_ml/pyproject.toml`) cut the API image from ~8.3GB to ~1.2GB, which also fixed real, reproducible `docker push` network timeouts under host contention — a correctness/cost trade-off that happened to fix a reliability problem too.
 
 **Kafka event publishing as best-effort, not a hard dependency.** `batch_inference.py` publishes a completion event after every batch run, but a broker outage never fails the pipeline — it logs a warning and continues. Observability must never become a single point of failure for the very process it observes.
 

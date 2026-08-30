@@ -52,6 +52,7 @@ La plataforma está diseñada desde el primer día bajo principios de Site Relia
 - **Iteración end-to-end completa en segundos, no en horas.** Un dataset "toy" fijo de ~1.000 filas, versionado con DVC, ejercita todo el pipeline — contratos de datos, preprocesamiento, búsqueda de hiperparámetros, entrenamiento, registro en MLflow — en una laptop, sin GPU y sin costo de nube, antes de tocar jamás el dataset completo.
 - **Cero configuración manual para un nuevo colaborador.** Un DevContainer más una réplica completa de la nube en `docker-compose.yml` (PostgreSQL, LocalStack, Kafka, MLflow, la API) hacen que un nuevo ingeniero corra `make up` y sea productivo de inmediato — sin instalar Python localmente, sin credenciales de AWS, sin estado compartido de "en mi máquina funciona".
 - **Nada llega a AWS que no haya pasado antes por una validación local más barata y rápida, y ningún job de CI/CD consume minutos compartidos de GitLab.com.** Los git hooks de pre-commit, las pruebas de integración locales basadas en Testcontainers, un emulador local del pipeline (`gitlab-ci-local`) y dos runners self-hosted (uno en el propio hardware del desarrollador, tag `local-hardware`; otro dentro del cluster EKS, tag `in-vpc`) detectan fallos y ejecutan el pipeline real sin tocar un solo recurso de cómputo compartido de GitLab.
+- **Un pronóstico real de 48 horas, no una simple consulta de un paso.** El modelo predice las próximas 48 lecturas horarias de temperatura del aceite a partir de las últimas 48 -- uno de los horizontes estándar del paper de DLinear para este mismo dataset -- en vez de predecir un solo paso adelante, que en esta serie es casi indistinguible de un baseline ingenuo ("la próxima lectura es igual a la última") y demostraría poco sobre la capacidad real de pronóstico del modelo.
 
 ---
 
@@ -143,7 +144,7 @@ graph TD
 2. **Ingeniería de features.** `data_processing.py` deriva features temporales (mes, día, hora), escala la serie y construye ventanas deslizantes para el modelo DLinear.
 3. **Entrenamiento.** `train.py` ejecuta una búsqueda de hiperparámetros con Optuna, entrena la red DLinear, y registra métricas, parámetros y tags de reproducibilidad en MLflow — empaquetando la red entrenada junto con sus escaladores de entrada/salida en un único modelo `pyfunc` personalizado.
 4. **Registro y quality gate.** El modelo entrenado se registra en el MLflow Model Registry. `quality_gate.py` solo avanza el alias `production` si el candidato es al menos tan bueno como el modelo actualmente en producción.
-5. **Servicio (Serving).** Tanto la API como el CronJob de batch resuelven el modelo por `nombre@alias_production` desde el registry al arrancar — nunca desde una ruta de archivo — y sirven predicciones online o escriben predicciones por lotes de vuelta a S3, según corresponda.
+5. **Servicio (Serving).** Tanto la API como el CronJob de batch resuelven el modelo por `nombre@alias_production` desde el registry al arrancar — nunca desde una ruta de archivo — y sirven predicciones online o escriben predicciones por lotes de vuelta a S3, según corresponda. `POST /predict` devuelve `predictions`, una lista de 48 valores (uno por cada hora pronosticada); el scoring por lotes escribe una columna `Prediction_h1..Prediction_hN` por fila para el mismo horizonte.
 6. **Despliegue.** El CI construye y sube la imagen del contenedor, y luego edita el tag de imagen del overlay de Kustomize y lo commitea a `main`. ArgoCD detecta el cambio en Git y reconcilia el clúster — el CI nunca toca directamente el servidor de la API del clúster.
 
 ---
@@ -381,7 +382,7 @@ El `Makefile` (`make help` lista todos los targets) es la interfaz única para t
 ├── Makefile                       # Interfaz de ejecución única -- local == CI
 ├── terraform/                     # Definiciones de IaC (AWS)
 │   ├── ecr.tf                     # Registro de contenedores y políticas de retención
-│   ├── eks.tf                     # Clúster de Kubernetes v1.30 con OIDC/IRSA
+│   ├── eks.tf                     # Clúster de Kubernetes v1.36 con OIDC/IRSA
 │   ├── iam.tf                     # Roles IAM y service accounts
 │   ├── provider.tf                # Configuración de AWS y estado remoto en S3
 │   ├── rds.tf                     # Backend de PostgreSQL con SG zero-trust
@@ -438,6 +439,8 @@ Cada decisión no obvia listada abajo fue tomada deliberadamente, con un trade-o
 **GitOps (ArgoCD, basado en pull) sobre que el CI empuje directamente al clúster.** Si el CI tuviera credenciales de `kubectl` hacia el clúster de producción, un pipeline comprometido (o un script con errores) podría mutar el clúster de forma directa e invisible. Con ArgoCD, el radio de impacto del CI se limita a comitear un archivo a Git; solo ArgoCD, corriendo dentro del clúster con su propio acceso acotado, tiene permitido mutar el estado del clúster — y cualquier drift manual se revierte automáticamente (`selfHeal: true`).
 
 **Kustomize sobre Helm.** Este proyecto tiene una sola aplicación con una única diferencia legítima por entorno (el tag de imagen y un par de valores específicos de la cuenta). El modelo de Kustomize, basado en parches y sin templates, encaja mejor que introducir un motor de templating completo y una historia de versionado de charts para un solo overlay; Helm se vuelve el mejor trade-off una vez que hay múltiples entornos o la necesidad de distribuir el chart externamente.
+
+**Wheel de PyTorch solo-CPU en vez del build con CUDA por defecto.** Ningún nodo de este cluster tiene GPU (el node group de inferencia es `t3.large`), y `train.py` ya resuelve el dispositivo de cómputo en tiempo de ejecución (`torch.device("cuda" if torch.cuda.is_available() else "cpu")`), así que una GPU se usaría automáticamente si alguna vez hubiera una disponible -- pero el wheel *por defecto* de `torch` en PyPI trae empaquetado el runtime completo de CUDA (varios GB de paquetes `nvidia-*`), peso muerto que nunca se ejecuta en esta infraestructura. Fijar `torch` al índice de wheels solo-CPU del propio PyTorch (`api/pyproject.toml`, `core_ml/pyproject.toml`) redujo la imagen de la API de ~8.3GB a ~1.2GB, lo que de paso corrigió timeouts de red reales y reproducibles en `docker push` bajo contención del host -- un trade-off de corrección/costo que además resolvió un problema de confiabilidad.
 
 **Publicación de eventos en Kafka en modo best-effort, no como dependencia dura.** `batch_inference.py` publica un evento de finalización después de cada corrida de batch, pero una caída del broker nunca hace fallar el pipeline — se registra una advertencia y se continúa. La observabilidad nunca debe convertirse en un punto único de fallo para el propio proceso que observa.
 
