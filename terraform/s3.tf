@@ -7,6 +7,12 @@
 # necesidad de pasarse valores en runtime.
 resource "aws_s3_bucket" "model_artifacts" {
   bucket = "${var.project_name}-model-artifacts-${data.aws_caller_identity.current.account_id}"
+
+  # Sin esto, "terraform destroy" falla con "BucketNotEmpty" en cuanto el
+  # bucket tiene un solo objeto real (dvc-store/, mlflow/, batch/ -- este
+  # bucket SIEMPRE los tiene una vez usado). Versionado está activo, así
+  # que force_destroy purga todas las versiones, no solo la actual.
+  force_destroy = true
 }
 
 resource "aws_s3_bucket_versioning" "model_artifacts_versioning" {

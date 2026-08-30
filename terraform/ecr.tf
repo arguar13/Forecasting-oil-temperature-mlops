@@ -9,6 +9,11 @@ resource "aws_ecr_repository" "dlinear_api" {
   name                 = "dlinear-forecast-api"
   image_tag_mutability = "IMMUTABLE"
 
+  # Sin esto, "terraform destroy" falla con RepositoryNotEmptyException en
+  # cuanto el repo tiene una sola imagen publicada -- este siempre las tiene
+  # una vez que docker:build-push corre.
+  force_delete = true
+
   image_scanning_configuration {
     scan_on_push = true
   }
@@ -52,6 +57,9 @@ output "ecr_repository_url" {
 resource "aws_ecr_repository" "dlinear_mlflow" {
   name                 = "dlinear-mlflow-server"
   image_tag_mutability = "IMMUTABLE"
+
+  # Ver la nota equivalente en aws_ecr_repository.dlinear_api.
+  force_delete = true
 
   image_scanning_configuration {
     scan_on_push = true
