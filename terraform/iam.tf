@@ -1,5 +1,15 @@
 # Least-privilege: solo lectura del bucket de artefactos de este proyecto
-# (no AmazonS3ReadOnlyAccess a nivel de cuenta).
+# (no AmazonS3ReadOnlyAccess a nivel de cuenta) -- salvo el prefijo batch/,
+# donde SÍ necesita escribir: core_ml/src/batch_inference.py (el mismo
+# contenedor de la API, usado como entrypoint del CronJob
+# dlinear-batch-inference) sube su resultado a
+# s3://<bucket>/batch/predictions_output.csv. Sin esto, el CronJob cargaba
+# el modelo y corria la inferencia bien, pero fallaba en el ultimo paso con
+# "AccessDenied: ... s3:PutObject ... because no identity-based policy
+# allows the s3:PutObject action" (verificado en el cluster real disparando
+# el CronJob manualmente). Acotado a ese prefijo -- no al bucket entero --
+# para no poder pisar por error el propio artefacto del modelo (mlflow/) ni
+# el store de DVC (dvc-store/).
 resource "aws_iam_policy" "dlinear_api_s3_read" {
   name = "dlinear-api-s3-read-policy"
 
@@ -15,6 +25,11 @@ resource "aws_iam_policy" "dlinear_api_s3_read" {
         Effect   = "Allow"
         Action   = ["s3:GetObject"]
         Resource = "${aws_s3_bucket.model_artifacts.arn}/*"
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["s3:PutObject"]
+        Resource = "${aws_s3_bucket.model_artifacts.arn}/batch/*"
       }
     ]
   })
