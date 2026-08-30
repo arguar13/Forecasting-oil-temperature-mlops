@@ -16,6 +16,46 @@ module "eks" {
   # AGREGADO: Habilitar OIDC para IRSA (IAM Roles for Service Accounts)
   enable_irsa = true
 
+  # metrics-server: EKS no lo instala por defecto (a diferencia de
+  # coredns/kube-proxy/vpc-cni, que el propio control plane gestiona sin
+  # necesidad de declararlos aquí). Sin él, la API metrics.k8s.io no existe
+  # -- kubernetes/base/api.yaml define un HorizontalPodAutoscaler
+  # (dlinear-hpa) que, sin esta API, queda permanentemente Degraded
+  # ("unable to fetch metrics from resource metrics API: the server could
+  # not find the requested resource (get pods.metrics.k8s.io)"),
+  # verificado en el cluster real vía `kubectl get application ... -o json`
+  # (ArgoCD reporta la Application entera como Degraded por este único
+  # recurso, aunque Deployments/Services estén sanos). Se instala como
+  # addon administrado por AWS (no un manifest aparte vía kubectl) para
+  # mantener todo el cluster reproducible desde Terraform.
+  cluster_addons = {
+    metrics-server = {
+      most_recent = true
+    }
+  }
+
+  # Sin esto, el add-on de arriba queda instalado (`Deployment 2/2 Running`)
+  # pero inalcanzable: el módulo ya abre el security group de los nodos al
+  # control plane para los puertos "webhook" comunes (443/4443/6443/8443/9443)
+  # y kubelet (10250) -- pero NO para el 10251 que usa metrics-server,
+  # porque no todo cluster lo instala. El APIService v1beta1.metrics.k8s.io
+  # quedaba "FailedDiscoveryCheck: context deadline exceeded" (verificado:
+  # `kubectl get apiservice v1beta1.metrics.k8s.io -o json` -- timeout
+  # intentando https://<pod-ip>:10251/..., mientras `kubectl logs`/`exec`
+  # -- que sí usan el 10250 ya abierto -- funcionaban con normalidad). Sin
+  # metrics.k8s.io, el HorizontalPodAutoscaler (kubernetes/base/api.yaml)
+  # queda permanentemente Degraded.
+  node_security_group_additional_rules = {
+    ingress_cluster_to_node_metrics_server = {
+      description                   = "Cluster API to node metrics-server webhook"
+      protocol                      = "tcp"
+      from_port                     = 10251
+      to_port                       = 10251
+      type                          = "ingress"
+      source_cluster_security_group = true
+    }
+  }
+
   # Sin esto, el módulo pone como único "KeyAdministrator" de la KMS key de
   # secrets al caller ACTUAL del apply -- terraform:plan en CI (asumiendo
   # TerraformCI_OIDC_Role) fallaba con "AccessDeniedException: ... because
