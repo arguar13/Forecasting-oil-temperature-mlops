@@ -165,7 +165,20 @@ if __name__ == "__main__":
     parser.add_argument("--artifact_dir", type=str, default="artifacts")
     parser.add_argument("--epochs", type=int, default=25)
     parser.add_argument("--patience", type=int, default=5)
-    parser.add_argument("--n_trials", type=int, default=3)
+    # 5, no 3: el proxy de Optuna (optimize_hyperparameters) solo entrena 2
+    # épocas por trial para evaluar un lr, pero el entrenamiento final corre
+    # hasta `epochs` (25) con early stopping -- un lr que luce razonable en
+    # ese proxy de 2 épocas puede necesitar más de 25 épocas para converger
+    # de verdad. Con solo 3 trials, quality_gate rechazó un candidato real
+    # (dlinear-ett-forecaster v3, run de train_model en CI) porque Optuna
+    # eligió lr=0.00031 -- muy por debajo de los lr=0.0065/0.0017 de las
+    # otras dos corridas que sí convergieron bien en el mismo presupuesto de
+    # 25 épocas (final_val_mse: 0.026 vs ~0.005-0.007). Sin semilla fija
+    # (torch.manual_seed/np.random.seed no se setean en este módulo), cada
+    # corrida de Optuna explora puntos distintos -- más trials no eliminan
+    # la varianza, pero sí bajan la probabilidad de terminar con el peor
+    # candidato de la búsqueda.
+    parser.add_argument("--n_trials", type=int, default=5)
     parser.add_argument(
         "--dataset",
         choices=["toy", "raw"],
