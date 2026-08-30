@@ -122,8 +122,9 @@ class DLinearForecaster(PythonModel):
 
         seq_len = int(context.model_config["seq_len"])
         n_features = int(context.model_config["n_features"])
+        pred_len = int(context.model_config.get("pred_len", 1))
 
-        self.model = DLinear(seq_len=seq_len, n_features=n_features)
+        self.model = DLinear(seq_len=seq_len, n_features=n_features, pred_len=pred_len)
         state_dict = torch.load(
             context.artifacts["model_state_dict"],
             map_location=torch.device("cpu"),
@@ -157,9 +158,16 @@ class DLinearForecaster(PythonModel):
 
         tensor = torch.tensor(scaled, dtype=torch.float32)
         with torch.no_grad():
-            output_scaled = self.model(tensor)  # [n_windows, 1]
+            output_scaled = self.model(tensor)  # [n_windows, pred_len]
 
-        return self.scaler_y.inverse_transform(output_scaled.numpy())
+        # scaler_y se ajustó sobre una única columna (el target, ver
+        # data_processing.py) -- espera entradas de forma (N, 1).
+        # output_scaled trae (n_windows, pred_len): aplanar a (n_windows *
+        # pred_len, 1), des-escalar, y volver a la forma original. Con
+        # pred_len=1 esto es un no-op (misma forma antes y después).
+        n_windows, pred_len = output_scaled.shape
+        flat = output_scaled.numpy().reshape(-1, 1)
+        return self.scaler_y.inverse_transform(flat).reshape(n_windows, pred_len)
 
 
 def log_and_register_model(
@@ -170,6 +178,7 @@ def log_and_register_model(
     seq_len: int,
     n_features: int,
     registered_model_name: str,
+    pred_len: int = 1,
 ) -> ModelVersion:
     """Loguea el modelo bundleado en el run activo y registra una nueva
     versión inmutable en el Model Registry de MLflow.
@@ -187,7 +196,7 @@ def log_and_register_model(
             "scaler_X": Path(scaler_x_path).as_posix(),
             "scaler_y": Path(scaler_y_path).as_posix(),
         },
-        model_config={"seq_len": seq_len, "n_features": n_features},
+        model_config={"seq_len": seq_len, "n_features": n_features, "pred_len": pred_len},
         registered_model_name=registered_model_name,
     )
     logger.info(

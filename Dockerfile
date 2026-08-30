@@ -6,13 +6,22 @@ WORKDIR /app
 ENV POETRY_VERSION=1.8.3 \
     POETRY_VIRTUALENVS_CREATE=false
 
-RUN pip install --no-cache-dir "poetry==$POETRY_VERSION"
+RUN pip install --no-cache-dir "poetry==$POETRY_VERSION" "poetry-plugin-export==1.8.0"
 
 # poetry.lock se copia sin comodín: el build falla si el lockfile no está
 # commiteado, en vez de degradar silenciosamente a una resolución no
 # determinista de dependencias.
 COPY api/pyproject.toml api/poetry.lock ./
-RUN poetry install --only main --no-interaction --no-ansi --sync
+# "poetry install --sync" (no "poetry export" + "pip install") moría en
+# silencio y de forma intermitente en este host (exit code 1, sin traceback
+# -- ver el mismo diagnóstico ya hecho para core_ml/train.Dockerfile y los
+# jobs train_model/quality_gate/integration_tests de .gitlab-ci.yml,
+# torch/DVC traen dependencias con C-extensions que disparan el mismo bug
+# del instalador de poetry en Linux/Docker Desktop). Mismo fix aquí: exportar
+# a requirements.txt y usar pip, que sí resuelve estable.
+RUN poetry export -f requirements.txt --without-hashes -o requirements.txt --only main \
+    && pip install --no-cache-dir -r requirements.txt \
+    && rm requirements.txt
 
 # Copiar la API
 COPY api/ ./api/

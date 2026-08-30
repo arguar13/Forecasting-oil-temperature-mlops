@@ -61,6 +61,9 @@ class ModelTrainer:
 
         self.n_features = X_train.shape[2]
         self.seq_len = X_train.shape[1]
+        # y_train ya viene en forma (N, pred_len) desde data_processing.py
+        # (pred_len=1 -> (N, 1), comportamiento histórico).
+        self.pred_len = y_train.shape[1] if y_train.dim() > 1 else 1
 
         self.train_loader = DataLoader(
             TensorDataset(X_train, y_train), batch_size=batch_size, shuffle=True
@@ -75,7 +78,9 @@ class ModelTrainer:
 
         def objective(trial):
             lr = trial.suggest_float("lr", 1e-4, 1e-2, log=True)
-            model = DLinear(seq_len=self.seq_len, n_features=self.n_features).to(device)
+            model = DLinear(
+                seq_len=self.seq_len, n_features=self.n_features, pred_len=self.pred_len
+            ).to(device)
             optimizer = optim.Adam(model.parameters(), lr=lr)
             criterion = nn.MSELoss()
 
@@ -114,7 +119,9 @@ class ModelTrainer:
         con la mejor pérdida de validación alcanzada.
         """
         logger.info(f"Entrenando modelo DLinear final en {device}...")
-        model = DLinear(seq_len=self.seq_len, n_features=self.n_features).to(device)
+        model = DLinear(
+            seq_len=self.seq_len, n_features=self.n_features, pred_len=self.pred_len
+        ).to(device)
         criterion = nn.MSELoss()
         optimizer = optim.Adam(model.parameters(), lr=best_lr)
 
@@ -222,6 +229,7 @@ if __name__ == "__main__":
         mlflow.log_params(
             {
                 "seq_len": trainer.seq_len,
+                "pred_len": trainer.pred_len,
                 "n_features": trainer.n_features,
                 "batch_size": trainer.batch_size,
                 "epochs": args.epochs,
@@ -245,6 +253,7 @@ if __name__ == "__main__":
             scaler_y_path=os.path.join(args.artifact_dir, "scaler_y.pkl"),
             seq_len=trainer.seq_len,
             n_features=trainer.n_features,
+            pred_len=trainer.pred_len,
             registered_model_name=args.registered_model_name,
         )
 

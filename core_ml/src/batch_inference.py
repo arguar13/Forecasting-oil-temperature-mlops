@@ -96,7 +96,17 @@ class BatchInferenceService:
             preds = self.model.predict(batch)  # una sola pasada vectorizada por lote
             predictions.append(np.asarray(preds))
 
-        output_df = pd.DataFrame(np.concatenate(predictions, axis=0), columns=["Prediction"])
+        stacked = np.concatenate(predictions, axis=0)
+        # El modelo puede predecir 1 paso (columna unica "Prediction",
+        # comportamiento historico) o varios pasos por ventana ("Prediction_h1"
+        # .. "Prediction_hN") -- el nombre de columnas se deriva de la forma
+        # real de salida del modelo en vez de asumir un horizonte fijo.
+        pred_len = stacked.shape[1] if stacked.ndim > 1 else 1
+        if pred_len == 1:
+            columns = ["Prediction"]
+        else:
+            columns = [f"Prediction_h{h}" for h in range(1, pred_len + 1)]
+        output_df = pd.DataFrame(stacked.reshape(len(stacked), pred_len), columns=columns)
         csv_buffer = io.StringIO()
         output_df.to_csv(csv_buffer, index=False)
 

@@ -53,7 +53,26 @@ def test_predict_returns_a_numeric_prediction(client):
     assert response.status_code == 200
     body = response.json()
     assert body["model_version"] == "dlinear-ett-forecaster@production"
-    assert body["prediction_value"] == pytest.approx(42.5)
+    # predictions es una lista (horizonte de predicción) -- el modelo fake
+    # de este test devuelve un solo paso, [[42.5]], pero el contrato ya
+    # soporta N pasos (ver core_ml/src/model_architecture.py::DLinear).
+    assert body["predictions"] == pytest.approx([42.5])
+
+
+def test_predict_returns_full_horizon_for_multi_step_model(monkeypatch):
+    import api.main as main_module
+
+    class _FakeMultiStepModel:
+        def predict(self, model_input):
+            return np.array([[1.0, 2.0, 3.0]])
+
+    monkeypatch.setattr(main_module, "load_model", lambda uri: _FakeMultiStepModel())
+
+    with TestClient(main_module.app) as test_client:
+        response = test_client.post("/predict", json={"features": _valid_features()})
+
+    assert response.status_code == 200
+    assert response.json()["predictions"] == pytest.approx([1.0, 2.0, 3.0])
 
 
 def test_predict_rejects_wrong_sequence_length(client):

@@ -145,16 +145,21 @@ def predict(request: PredictionRequest):
         # que ya está alineado con ese orden.
         df_input = pd.DataFrame([reading.model_dump() for reading in request.features])
         prediction = model.predict(df_input)
-        prediction_value = float(prediction[0][0])
+        # prediction tiene forma (1, pred_len): una sola ventana de entrada,
+        # pred_len valores futuros (1 en el caso histórico de un solo paso,
+        # >1 para un horizonte multi-step -- ver
+        # core_ml/src/model_architecture.py::DLinear).
+        predictions = [float(v) for v in prediction[0]]
 
         logger.info(
             "predict_succeeded",
             model_version=f"{MODEL_NAME}@{MODEL_ALIAS}",
+            horizon=len(predictions),
             duration_ms=round((time.monotonic() - start) * 1000, 2),
         )
         return {
             "model_version": f"{MODEL_NAME}@{MODEL_ALIAS}",
-            "prediction_value": prediction_value,
+            "predictions": predictions,
         }
     except Exception as e:
         logger.error(

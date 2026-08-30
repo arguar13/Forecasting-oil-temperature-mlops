@@ -22,6 +22,17 @@ class _FakePyfuncModel:
         return np.full((n_windows, 1), 42.5)
 
 
+class _FakeMultiStepPyfuncModel:
+    """Simula un modelo con horizonte multi-step (pred_len > 1)."""
+
+    def __init__(self, pred_len: int):
+        self.pred_len = pred_len
+
+    def predict(self, model_input):
+        n_windows = model_input.shape[0] if model_input.ndim == 3 else 1
+        return np.full((n_windows, self.pred_len), 42.5)
+
+
 def _valid_batch_df(n_rows: int) -> pd.DataFrame:
     row = {
         "HUFL": 5.8,
@@ -107,3 +118,30 @@ def test_process_batch_scores_and_uploads_predictions(monkeypatch, service):
     assert list(result_df.columns) == ["Prediction"]
     assert len(result_df) == n_rows - service.seq_len + 1
     assert (result_df["Prediction"] == 42.5).all()
+
+
+def test_process_batch_names_columns_per_horizon_step_for_multi_step_model(monkeypatch, service):
+    n_rows = service.seq_len + 5
+    df = _valid_batch_df(n_rows)
+    payload = df.to_csv(index=False).encode()
+    service.model = _FakeMultiStepPyfuncModel(pred_len=3)
+
+    monkeypatch.setattr(
+        service.s3_client,
+        "get_object",
+        lambda Bucket, Key: {"Body": _FakeBody(payload)},
+    )
+
+    uploaded = {}
+    monkeypatch.setattr(
+        service.s3_client,
+        "put_object",
+        lambda Bucket, Key, Body: uploaded.update(bucket=Bucket, key=Key, body=Body),
+    )
+
+    service.process_batch()
+
+    result_df = pd.read_csv(io.StringIO(uploaded["body"]))
+    assert list(result_df.columns) == ["Prediction_h1", "Prediction_h2", "Prediction_h3"]
+    assert len(result_df) == n_rows - service.seq_len + 1
+    assert (result_df == 42.5).all().all()

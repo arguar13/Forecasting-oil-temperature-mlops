@@ -10,7 +10,17 @@ def test_dlinear_forward_pass_returns_expected_shape():
 
     output = model(x)
 
-    assert output.shape == (batch_size, 1)
+    assert output.shape == (batch_size, 1)  # pred_len=1 (default): un solo paso adelante
+
+
+def test_dlinear_forward_pass_supports_multi_step_horizon():
+    batch_size, seq_len, n_features, pred_len = 4, 48, 10, 48
+    model = DLinear(seq_len=seq_len, n_features=n_features, pred_len=pred_len)
+    x = torch.randn(batch_size, seq_len, n_features)
+
+    output = model(x)
+
+    assert output.shape == (batch_size, pred_len)
 
 
 def test_dlinear_is_deterministic_in_eval_mode():

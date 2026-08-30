@@ -44,8 +44,11 @@ class ETTDatasetContract(BaseModel):
         "OT",
     )
     target_column: str = "OT"
-    # Con seq_len=48 y split 70/10/20, 600 filas garantizan >=10 ventanas
-    # deslizantes utilizables incluso en el split de validación (el más chico).
+    # Piso de integridad del dataset crudo (filas suficientes para que el
+    # contrato tenga sentido), NO una garantía de cuántas ventanas
+    # deslizantes salen de él -- eso depende de seq_length + pred_length
+    # (data_processing.py), que este contrato no conoce. El dataset real
+    # (ETTh1.csv, ~17k filas) queda muy por encima en cualquier caso.
     min_rows: int = Field(default=600)
     columns: tuple[ColumnContract, ...] = (
         ColumnContract(name="HUFL", min_value=-40.0, max_value=40.0),

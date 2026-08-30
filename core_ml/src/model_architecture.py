@@ -37,13 +37,19 @@ class series_decomp(nn.Module):
 
 
 class DLinear(nn.Module):
-    def __init__(self, seq_len=48, n_features=10):
+    def __init__(self, seq_len=48, n_features=10, pred_len=1):
         super().__init__()
         self.seq_len = seq_len
+        self.pred_len = pred_len
         self.decompsition = series_decomp(25)
         self.Linear_Seasonal = nn.Linear(seq_len, 1)
         self.Linear_Trend = nn.Linear(seq_len, 1)
-        self.combine = nn.Linear(n_features, 1)
+        # pred_len, no 1: define cuántos pasos futuros produce cada
+        # ventana. Sigue siendo la misma arquitectura DLinear (descompone
+        # en estacional/tendencia, proyecta seq_len->1 por canal, combina
+        # los n_features) -- solo cambia el ancho de esta última capa, el
+        # cabezal de salida.
+        self.combine = nn.Linear(n_features, pred_len)
 
     def forward(self, x):
         seasonal_init, trend_init = self.decompsition(x)

@@ -27,21 +27,36 @@ class DataProcessor:
         seq_length: int = 48,
         output_dir: str = "artifacts",
         contract: ETTDatasetContract = ETT_CONTRACT,
+        pred_length: int = 1,
     ):
         self.data_path = data_path
         self.seq_length = seq_length
         self.output_dir = output_dir
         self.contract = contract
+        # Horizonte de predicción: cuántos pasos futuros predice cada
+        # ventana. 1 = un solo paso adelante (comportamiento histórico);
+        # >1 genera una secuencia de `pred_length` valores futuros por
+        # ventana, no un único escalar.
+        self.pred_length = pred_length
 
         if not os.path.exists(self.output_dir):
             os.makedirs(self.output_dir)
 
     def _create_sequences(self, X: np.ndarray, y: np.ndarray):
-        """Genera secuencias de ventanas deslizantes."""
+        """Genera secuencias de ventanas deslizantes.
+
+        Cada ventana de entrada X[i:i+seq_length] se empareja con los
+        `pred_length` valores futuros y[i+seq_length : i+seq_length+pred_length]
+        -- no solo el siguiente valor. `y` ya llega escalado (ver
+        process_and_save) y con una sola columna (el target), así que el
+        `.squeeze(-1)` deja cada ventana de salida en forma (pred_length,),
+        no (pred_length, 1).
+        """
         Xs, ys = [], []
-        for i in range(len(X) - self.seq_length):
+        last_start = len(X) - self.seq_length - self.pred_length + 1
+        for i in range(last_start):
             Xs.append(X[i : i + self.seq_length])
-            ys.append(y[i + self.seq_length])
+            ys.append(y[i + self.seq_length : i + self.seq_length + self.pred_length].squeeze(-1))
         return np.array(Xs), np.array(ys)
 
     def process_and_save(self):
@@ -138,6 +153,14 @@ if __name__ == "__main__":
         help="Sobreescribe la ruta del CSV de entrada (por defecto se deriva de --dataset).",
     )
     parser.add_argument("--seq_length", type=int, default=48)
+    parser.add_argument(
+        "--pred_length",
+        type=int,
+        default=48,
+        help="Horizonte de predicción (pasos futuros por ventana). 48 = predice las "
+        "próximas 48 horas a partir de las 48 anteriores (mismo orden que seq_length, "
+        "uno de los horizontes estándar del paper de DLinear en ETTh1).",
+    )
     parser.add_argument("--output_dir", type=str, default="artifacts")
     args = parser.parse_args()
 
@@ -148,5 +171,11 @@ if __name__ == "__main__":
         data_path = args.data_path or RAW_DATA_PATH
         contract = ETT_CONTRACT
 
-    processor = DataProcessor(data_path, args.seq_length, args.output_dir, contract=contract)
+    processor = DataProcessor(
+        data_path,
+        args.seq_length,
+        args.output_dir,
+        contract=contract,
+        pred_length=args.pred_length,
+    )
     processor.process_and_save()

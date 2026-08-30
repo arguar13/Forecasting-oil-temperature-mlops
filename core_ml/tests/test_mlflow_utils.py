@@ -100,3 +100,17 @@ def test_dlinear_forecaster_predict_handles_batch_of_sequences():
     result = forecaster.predict(context=None, model_input=batch)
 
     assert result.shape == (5, 1)
+
+
+def test_dlinear_forecaster_predict_handles_multi_step_horizon():
+    forecaster = DLinearForecaster()
+    forecaster.model = DLinear(seq_len=48, n_features=10, pred_len=48)
+    forecaster.model.eval()
+    forecaster.scaler_X = _IdentityScaler()
+    forecaster.scaler_y = _IdentityScaler()
+
+    batch = np.random.rand(5, 48, 10)
+
+    result = forecaster.predict(context=None, model_input=batch)
+
+    assert result.shape == (5, 48)
