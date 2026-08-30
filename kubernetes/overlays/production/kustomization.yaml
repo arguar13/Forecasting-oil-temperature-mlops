@@ -34,7 +34,7 @@ configMapGenerator:
 images:
 - name: dlinear-api
   newName: 040175285118.dkr.ecr.us-east-1.amazonaws.com/dlinear-forecast-api
-  newTag: 38d307253e16a6396d730a9ebfc3b3f7d8954b4e
+  newTag: 5c8d60eab62ed21e1ca1fd4b57dfb7deeaeced06
 - name: mlflow-server
   newName: 040175285118.dkr.ecr.us-east-1.amazonaws.com/dlinear-mlflow-server
-  newTag: 38d307253e16a6396d730a9ebfc3b3f7d8954b4e
+  newTag: 5c8d60eab62ed21e1ca1fd4b57dfb7deeaeced06
