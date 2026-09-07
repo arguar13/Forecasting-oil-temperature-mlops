@@ -61,6 +61,41 @@ resource "aws_iam_policy" "dlinear_batch_cloudwatch" {
   })
 }
 
+# core_ml/src/monitoring/stream_consumer.py (lectura) y
+# scripts/sensor_simulator.py (escritura) -- ambos corren bajo dlinear-sa,
+# igual que la API y el CronJob de batch, asi que la policy se adjunta al
+# mismo rol IRSA compartido de abajo en vez de crear uno nuevo.
+resource "aws_iam_policy" "dlinear_kinesis_stream" {
+  name = "dlinear-kinesis-sensor-stream-policy"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "ConsumerRead"
+        Effect = "Allow"
+        Action = [
+          "kinesis:GetRecords",
+          "kinesis:GetShardIterator",
+          "kinesis:DescribeStreamSummary",
+          "kinesis:ListShards",
+        ]
+        Resource = aws_kinesis_stream.sensor_telemetry.arn
+      },
+      {
+        # PutRecord: solo lo usa scripts/sensor_simulator.py (el reemplazo
+        # de un sensor real para este dataset historico), pero corre bajo
+        # el mismo Job/ServiceAccount que el batch de inferencia, asi que
+        # comparte esta misma policy en lugar de una tercera.
+        Sid      = "SimulatorWrite"
+        Effect   = "Allow"
+        Action   = ["kinesis:PutRecord", "kinesis:PutRecords"]
+        Resource = aws_kinesis_stream.sensor_telemetry.arn
+      }
+    ]
+  })
+}
+
 # IAM Role para que el Pod de la API pueda leer modelos de S3 (IRSA)
 module "iam_eks_role" {
   source  = "terraform-aws-modules/iam/aws//modules/iam-role-for-service-accounts-eks"
@@ -75,6 +110,7 @@ module "iam_eks_role" {
   role_policy_arns = {
     s3_read    = aws_iam_policy.dlinear_api_s3_read.arn
     cloudwatch = aws_iam_policy.dlinear_batch_cloudwatch.arn
+    kinesis    = aws_iam_policy.dlinear_kinesis_stream.arn
   }
 
   oidc_providers = {
