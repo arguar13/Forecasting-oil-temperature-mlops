@@ -100,11 +100,13 @@ graph TD
             API[FastAPI: Inferencia Online]
             HPA[Horizontal Pod Autoscaler]
             CRON[CronJob de Inferencia por Lotes]
+            STREAM[Stream Consumer: inferencia online + drift CUSUM]
         end
 
+        KINESIS[(Kinesis: Telemetría de Sensores)]
         S3[S3: Artefactos de Modelo, DVC Store, Datos de Batch]
         ECR[ECR: Registro de Contenedores]
-        RDS[(RDS PostgreSQL: Backend de MLflow)]
+        RDS[(RDS PostgreSQL: Backend de MLflow + Log de Predicciones)]
     end
 
     %% Connections
@@ -134,6 +136,11 @@ graph TD
     API <-->|lectura segura vía IRSA| S3
     CRON <-->|lee inputs / escribe outputs| S3
 
+    KINESIS -->|lecturas horarias de sensores| STREAM
+    STREAM -->|predicciones a 1 paso + residuos reconciliados| RDS
+    STREAM -->|alerta CUSUM confirmada| MIT[mitigation.py: cooldown + techo]
+    MIT -->|API de Pipeline Trigger, AUTO_RETRAIN=true| CICD
+
     HPA -->|escala pods según CPU/RAM| API
     EKS -->|tráfico restringido solo por SG| RDS
 ```
@@ -146,6 +153,7 @@ graph TD
 4. **Registro y quality gate.** El modelo entrenado se registra en el MLflow Model Registry. `quality_gate.py` solo avanza el alias `production` si el candidato es al menos tan bueno como el modelo actualmente en producción.
 5. **Servicio (Serving).** Tanto la API como el CronJob de batch resuelven el modelo por `nombre@alias_production` desde el registry al arrancar — nunca desde una ruta de archivo — y sirven predicciones online o escriben predicciones por lotes de vuelta a S3, según corresponda. `POST /predict` devuelve `predictions`, una lista de 48 valores (uno por cada hora pronosticada); el scoring por lotes escribe una columna `Prediction_h1..Prediction_hN` por fila para el mismo horizonte.
 6. **Despliegue.** El CI construye y sube la imagen del contenedor, y luego edita el tag de imagen del overlay de Kustomize y lo commitea a `main`. ArgoCD detecta el cambio en Git y reconcilia el clúster — el CI nunca toca directamente el servidor de la API del clúster.
+7. **Inferencia por streaming y mitigación.** [`stream_consumer.py`](core_ml/src/monitoring/stream_consumer.py) lee lecturas de sensores desde Kinesis, produce una predicción a 1 hora vista por cada 48 horas de ventana acumulada, y reconcilia las anteriores en residuos. Dos rastreadores CUSUM vigilan un corrimiento físico del sensor (drift de datos) y un corrimiento en la propia exactitud del modelo (concept drift); una alerta confirmada puede lanzar un reentrenamiento acotado y protegido por cooldown a través del mismo pipeline de CI — devuelto al paso 3 vía la API de Pipeline Trigger de GitLab — sin saltarse nunca el quality gate del paso 4.
 
 ---
 
@@ -164,7 +172,9 @@ graph TD
 | **Infraestructura como Código** | Terraform | Aprovisionamiento declarativo de VPC, EKS, RDS, S3, ECR, IAM. |
 | **CI/CD** | GitLab CI/CD, OpenID Connect, gitlab-ci-local, runners self-hosted (Docker local + EKS) | Pipelines autenticados vía OIDC; validación local de jobs antes de hacer push; ejecución real sin consumir minutos compartidos de GitLab.com. |
 | **Observabilidad y Resiliencia** | structlog, tenacity, pybreaker | Logging estructurado en JSON, reintentos acotados con backoff, circuit breaking. |
-| **Servicios Cloud** | Amazon S3, ECR, RDS PostgreSQL, VPC | Almacenamiento gestionado, registry, base de datos y redes. |
+| **Streaming y Detección de Drift** | Amazon Kinesis Data Streams, CUSUM (test de Page) | Ingesta de telemetría de sensores; detección de drift de datos/concepto vía estadística de cambio de punto, no una librería de forma de distribución. |
+| **Mitigación y Promoción Automáticas** | API de Pipeline Trigger de GitLab, alias del MLflow Model Registry | Reentrenamiento automático acotado por cooldown y techo ante una alerta de drift confirmada; la comparación producción-vs-candidato de `quality_gate.py` (con tolerancia y rollback de un paso) condiciona toda promoción. |
+| **Servicios Cloud** | Amazon S3, ECR, RDS PostgreSQL, Kinesis, VPC | Almacenamiento gestionado, registry, base de datos, streaming y redes. |
 | **Desarrollo Local** | DevContainers, Poetry, Makefile | Entorno estandarizado, dependencias deterministas, interfaz de ejecución única. |
 | **Calidad de Código** | Ruff, Black, isort, mypy, pytest, Bandit, Trivy, yamllint, detect-secrets | Análisis estático shift-left, formateo, tipado, pruebas y escaneo de seguridad. |
 | **Seguridad** | IRSA, AWS STS, redes zero-trust | Credenciales de corta duración y alcance acotado; sin secretos de larga vida en el código de la aplicación. |
@@ -232,7 +242,9 @@ La seguridad se aplica tanto en la capa de identidad como en la de red.
 - **Detección de drift de infraestructura.** ArgoCD corre con `prune: true` y `selfHeal: true`: cualquier cambio manual con `kubectl` o drift de configuración en el clúster se detecta automáticamente y se revierte para coincidir con Git, de modo que el estado real del clúster nunca puede divergir silenciosamente de su estado declarado.
 - **Degradación elegante en lugar de crash-looping.** El arranque de la API no trata "todavía no hay ningún modelo `production` registrado" como un error fatal: `/health` (liveness) siempre responde 200, mientras que `/ready` y `/predict` responden 503 hasta que se promueve un modelo — la semántica correcta de Kubernetes para separar "el proceso está vivo" de "el proceso está listo para servir".
 
-**Limitación conocida — monitoreo de drift de datos/modelo.** Esta plataforma aún no incluye detección estadística de drift (p. ej. Evidently AI) ni un backend de métricas (Prometheus/Grafana) que rastree la distribución de las predicciones a lo largo del tiempo en producción. En la escala actual del proyecto, el quality gate de MLflow y los contratos de datos fail-fast cubren los modos de fallo más comunes y de mayor impacto — un modelo con regresión o un input malformado — antes de que puedan causar daño. El monitoreo continuo de drift es la siguiente capa a agregar a medida que se acumule tráfico real de producción; ver [Roadmap](#roadmap).
+- **Ingesta de telemetría por streaming (Amazon Kinesis).** [`terraform/kinesis.tf`](terraform/kinesis.tf) aprovisiona un Kinesis Data Stream on-demand; [`scripts/sensor_simulator.py`](core_ml/scripts/sensor_simulator.py) reproduce las lecturas horarias históricas de ETTh1 hacia él (no hay un sensor real en este portafolio del que transmitir — la misma situación que 610-hotel-booking-mlops resuelve con su propio `replay_bookings.py`). Kinesis, no Kafka: este dominio es un solo sensor físico, no muchos productores de eventos independientes, y el modelo más simple de iterador por shard de Kinesis encaja mejor que un broker basado en grupos consumidores.
+- **Inferencia online + detección de drift por CUSUM.** [`core_ml/src/monitoring/stream_consumer.py`](core_ml/src/monitoring/stream_consumer.py) consume ese stream: por cada 48 lecturas horarias consecutivas que acumula, le pide al modelo servido la temperatura de aceite de la *siguiente* hora y registra esa predicción a 1 paso ([`drift_store.py`](core_ml/src/monitoring/drift_store.py), un segundo schema en la misma instancia de RDS que ya usa el backend de MLflow); cada lectura nueva es también una oportunidad de reconciliar una predicción anterior en un residuo. Dos detectores CUSUM (test de Page) de dos colas independientes — [`changepoint.py`](core_ml/src/monitoring/changepoint.py) — vigilan, respectivamente, las siete lecturas crudas de sensores en busca de un corrimiento físico de nivel (drift de datos) y los residuos reconciliados en busca de un corrimiento en la propia exactitud del modelo (concept drift). CUSUM, no histogramas PSI/Jensen-Shannon: esos encajan con atributos categóricos por reserva (el propio dominio de 610); una lectura física continua de una sola máquina en el tiempo es una pregunta de corrimiento de nivel, exactamente lo que la detección de cambio de punto está construida para responder.
+- **Mitigación automática acotada.** Una alerta CUSUM confirmada llega a [`mitigation.py`](core_ml/src/monitoring/mitigation.py), que puede lanzar un reentrenamiento vía la API de Pipeline Trigger de GitLab — acotado por un cooldown (un disparo por incidente) y un techo duro de reentrenamientos automáticos por ventana móvil, de modo que una fuente de drift que un reentrenamiento no puede arreglar llegue a un humano en vez de disparar para siempre. Lo que no puede hacer es promover nada: [`quality_gate.py`](core_ml/src/quality_gate.py) ya se negaba a mover el alias `production` sin comparar un candidato contra lo que está sirviendo actualmente, y esa comparación — ahora con un `--tolerance` configurable y `--rollback` de un paso — sigue estando entre cada reentrenamiento, automático o manual, y el tráfico de producción.
 
 ---
 
@@ -444,13 +456,13 @@ Cada decisión no obvia listada abajo fue tomada deliberadamente, con un trade-o
 
 **Publicación de eventos en Kafka en modo best-effort, no como dependencia dura.** `batch_inference.py` publica un evento de finalización después de cada corrida de batch, pero una caída del broker nunca hace fallar el pipeline — se registra una advertencia y se continúa. La observabilidad nunca debe convertirse en un punto único de fallo para el propio proceso que observa.
 
-**Sin un stack de monitoreo de drift todavía (Evidently/Prometheus/Grafana).** Esta es una decisión consciente de alcance, no un descuido: a la escala de tráfico actual, el quality gate de MLflow y los contratos de datos fail-fast ya previenen los dos modos de fallo con mayor probabilidad y costo — un modelo con regresión llegando a producción, e input malformado llegando al modelo. Una capa completa de monitoreo estadístico de drift es trabajo real y valioso para una fase futura (ver [Roadmap](#roadmap)), pero se despriorizó en favor de reforzar primero las garantías de despliegue y reproducibilidad.
+**CUSUM en vez de una librería estadística de drift (sin Evidently/Prometheus/Grafana).** Un hallazgo de drift es una afirmación operativa que tiene que ser reproducible a partir de entradas documentadas; el CUSUM de dos colas en [`changepoint.py`](core_ml/src/monitoring/changepoint.py) son menos de 150 líneas de aritmética sin dependencias, no una librería cuya estrategia de binning y umbrales por defecto puede cambiar entre una versión menor y otra. Cuatro números por ventana sobre un modelo pertenecen a la misma instancia de MLflow que ya rastrea todo lo demás sobre él, no a un segundo plano de observabilidad que operar y asegurar para el volumen que maneja este proyecto.
 
 ---
 
 ## Roadmap
 
-- Monitoreo estadístico de drift de datos/concepto (Evidently AI) con un dashboard de Prometheus + Grafana para las distribuciones de predicciones y la latencia de serving a lo largo del tiempo.
+- Entrega progresiva (rollouts canary o blue/green) vía Argo Rollouts, en reemplazo del rollout directo actual al actualizar la imagen.
 - Entrega progresiva (rollouts canary o blue/green) vía Argo Rollouts, en reemplazo del rollout directo actual al actualizar la imagen.
 - Soporte multi-modelo en el registry (por ejemplo, modelos por región o por segmento) detrás del mismo patrón de resolución `nombre@alias`.
 - Benchmarking de costo y rendimiento del CronJob de batch al volumen completo de datos de producción, con paralelismo autoescalado.

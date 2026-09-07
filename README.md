@@ -100,11 +100,13 @@ graph TD
             API[FastAPI Online Inference]
             HPA[Horizontal Pod Autoscaler]
             CRON[Batch Inference CronJob]
+            STREAM[Stream Consumer: online inference + CUSUM drift]
         end
 
+        KINESIS[(Kinesis: Sensor Telemetry)]
         S3[S3: Model Artifacts, DVC Store, Batch Data]
         ECR[ECR: Container Registry]
-        RDS[(RDS PostgreSQL: MLflow Backend)]
+        RDS[(RDS PostgreSQL: MLflow Backend + Prediction Log)]
     end
 
     %% Connections
@@ -134,6 +136,11 @@ graph TD
     API <-->|secure read via IRSA| S3
     CRON <-->|read inputs / write output| S3
 
+    KINESIS -->|hourly sensor readings| STREAM
+    STREAM -->|1-step predictions + reconciled residuals| RDS
+    STREAM -->|confirmed CUSUM alert| MIT[mitigation.py: cooldown + ceiling]
+    MIT -->|Pipeline Trigger API, AUTO_RETRAIN=true| CICD
+
     HPA -->|scales pods on CPU/RAM| API
     EKS -->|restricted SG traffic only| RDS
 ```
@@ -146,6 +153,7 @@ graph TD
 4. **Registration & quality gate.** The trained model is registered in the MLflow Model Registry. `quality_gate.py` only advances the `production` alias if the candidate is at least as good as the current production model.
 5. **Serving.** The API and the batch CronJob both resolve the model by `name@production_alias` from the registry at startup — never from a file path — and serve online predictions or write batch predictions back to S3, respectively. `POST /predict` returns `predictions`, a 48-value list (one per forecasted hour); batch scoring writes one `Prediction_h1..Prediction_hN` column pair per row for the same horizon.
 6. **Deployment.** CI builds and pushes the container image, then edits the Kustomize overlay's image tag and commits it to `main`. ArgoCD detects the change in Git and reconciles the cluster — CI itself never touches the cluster's API server.
+7. **Streaming inference & mitigation.** [`stream_consumer.py`](core_ml/src/monitoring/stream_consumer.py) reads sensor readings from Kinesis, produces a 1-step-ahead prediction every 48 hours of accumulated window, and reconciles older ones into residuals. Two CUSUM trackers watch for a physical sensor shift (data drift) and a shift in the model's own accuracy (concept drift); a confirmed alert may launch a bounded, cooldown-guarded retrain through the same CI pipeline — routed back to step 3 through GitLab's Pipeline Trigger API — never bypassing step 4's quality gate.
 
 ---
 
@@ -164,7 +172,9 @@ graph TD
 | **Infrastructure as Code** | Terraform | Declarative provisioning of VPC, EKS, RDS, S3, ECR, IAM. |
 | **CI/CD** | GitLab CI/CD, OpenID Connect, gitlab-ci-local, self-hosted runners (local Docker + EKS) | OIDC-authenticated pipelines; local job validation before pushing; real execution without consuming GitLab.com's shared-runner minutes. |
 | **Observability & Resilience** | structlog, tenacity, pybreaker | JSON structured logging, bounded retries with backoff, circuit breaking. |
-| **Cloud Services** | Amazon S3, ECR, RDS PostgreSQL, VPC | Managed storage, registry, database and networking. |
+| **Streaming & Drift Detection** | Amazon Kinesis Data Streams, CUSUM (Page's test) | Sensor telemetry ingestion; data/concept drift detection via change-point statistics, not a distribution-shape library. |
+| **Automatic Mitigation & Promotion** | GitLab Pipeline Trigger API, MLflow Model Registry aliases | Cooldown- and ceiling-bounded auto-retrain on a confirmed drift alert; `quality_gate.py`'s production-vs-candidate comparison (with tolerance and one-step rollback) gates every promotion. |
+| **Cloud Services** | Amazon S3, ECR, RDS PostgreSQL, Kinesis, VPC | Managed storage, registry, database, streaming and networking. |
 | **Local Development** | DevContainers, Poetry, Makefile | Standardized environment, deterministic dependencies, single execution interface. |
 | **Code Quality** | Ruff, Black, isort, mypy, pytest, Bandit, Trivy, yamllint, detect-secrets | Shift-left static analysis, formatting, typing, testing and security scanning. |
 | **Security** | IRSA, AWS STS, zero-trust networking | Short-lived, scoped credentials; no long-lived secrets in application code. |
@@ -232,7 +242,9 @@ Security is enforced at both the identity and network layers.
 - **Infrastructure drift detection.** ArgoCD runs with `prune: true` and `selfHeal: true`: any manual `kubectl` change or configuration drift in the cluster is automatically detected and reverted to match Git, so the cluster's actual state can never silently diverge from its declared state.
 - **Graceful degradation over crash-looping.** The API's startup does not treat "no `production` model registered yet" as fatal: `/health` (liveness) always returns 200, while `/ready` and `/predict` return 503 until a model is promoted — the correct Kubernetes semantics for separating "the process is alive" from "the process is ready to serve".
 
-**Known limitation — model/data drift monitoring.** This platform does not yet include statistical drift detection (e.g. Evidently AI) or a metrics backend (Prometheus/Grafana) tracking prediction distributions over time in production. At the current scale, the MLflow quality gate and the fail-fast data contracts catch the most common and highest-impact failure modes — a regressed model or malformed input — before they can cause damage. Continuous drift monitoring is the next layer to add as real production traffic accumulates; see [Roadmap](#roadmap).
+- **Streaming sensor ingestion (Amazon Kinesis).** [`terraform/kinesis.tf`](terraform/kinesis.tf) provisions an on-demand Kinesis Data Stream; [`scripts/sensor_simulator.py`](core_ml/scripts/sensor_simulator.py) replays ETTh1's historical hourly readings onto it (there is no live sensor in this portfolio to stream from — the same situation 610-hotel-booking-mlops solves with its own `replay_bookings.py`). Kinesis, not Kafka: this domain is one physical sensor, not many independent event producers, and Kinesis's simpler per-shard iterator model fits that better than a consumer-group-based broker would.
+- **Online inference + CUSUM drift detection.** [`core_ml/src/monitoring/stream_consumer.py`](core_ml/src/monitoring/stream_consumer.py) consumes that stream: for every 48 consecutive hourly readings it accumulates, it asks the served model for the *next* hour's oil temperature and records that 1-step-ahead prediction ([`drift_store.py`](core_ml/src/monitoring/drift_store.py), a second schema in the same RDS instance MLflow's backend store already uses); every new reading is also a chance to reconcile an older prediction into a residual. Two independent two-sided CUSUM (Page's test) trackers — [`changepoint.py`](core_ml/src/monitoring/changepoint.py) — watch, respectively, the seven raw sensor readings for a physical level shift (data drift) and the reconciled residuals for a shift in the model's own accuracy (concept drift). CUSUM, not PSI/Jensen-Shannon histograms: those fit categorical, per-booking attributes (610's own domain); a continuous physical reading from one machine over time is a level-shift question, the exact thing change-point detection is built for.
+- **Bounded automatic mitigation.** A confirmed CUSUM alert reaches [`mitigation.py`](core_ml/src/monitoring/mitigation.py), which may launch a retrain through GitLab's Pipeline Trigger API — bounded by a cooldown (one trigger per incident) and a hard ceiling on automatic retrains per rolling window, so a drift source a retrain cannot fix reaches a human instead of retriggering forever. What it cannot do is promote anything: [`quality_gate.py`](core_ml/src/quality_gate.py) already refused to move the `production` alias without comparing a candidate to whatever is currently serving, and that comparison — now with a configurable `--tolerance` and one-step `--rollback` — still stands between every retrain, automatic or manual, and production traffic.
 
 ---
 
@@ -444,13 +456,13 @@ Every non-obvious choice below was made deliberately, with an explicit trade-off
 
 **Kafka event publishing as best-effort, not a hard dependency.** `batch_inference.py` publishes a completion event after every batch run, but a broker outage never fails the pipeline — it logs a warning and continues. Observability must never become a single point of failure for the very process it observes.
 
-**No drift-monitoring stack yet (Evidently/Prometheus/Grafana).** This is a conscious scope decision, not an oversight: at the current traffic scale, the MLflow quality gate and fail-fast data contracts already prevent the two failure modes with the highest probability and cost — a regressed model reaching production, and malformed input reaching the model. A full statistical drift-monitoring layer is real, valuable work for a future phase (see [Roadmap](#roadmap)), but it was deprioritized in favor of hardening the deployment and reproducibility guarantees first.
+**CUSUM over a statistical drift library (no Evidently/Prometheus/Grafana).** A drift finding is an operational claim that has to be reproducible from documented inputs; the two-sided CUSUM in [`changepoint.py`](core_ml/src/monitoring/changepoint.py) is under 150 lines of dependency-free arithmetic, not a library whose binning strategy and defaults can move across a minor release. Four numbers a window about one model belong in the same MLflow instance already tracking everything else about it, not a second observability plane to operate and secure for the volume this project runs at.
 
 ---
 
 ## Roadmap
 
-- Statistical data/concept drift monitoring (Evidently AI) with a Prometheus + Grafana dashboard for prediction distributions and serving latency over time.
+- Progressive delivery (canary or blue/green rollouts) via Argo Rollouts, replacing the current direct rollout on image update.
 - Progressive delivery (canary or blue/green rollouts) via Argo Rollouts, replacing the current direct rollout on image update.
 - Multi-model support in the registry (e.g. per-region or per-segment models) behind the same `name@alias` resolution pattern.
 - Cost and performance benchmarking of the batch CronJob at full production data volume, with autoscaled parallelism.
