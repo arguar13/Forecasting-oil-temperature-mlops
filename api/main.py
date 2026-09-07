@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from typing import cast
 
 import mlflow
+import numpy as np
 import pandas as pd
 import pybreaker
 from fastapi import FastAPI, HTTPException
@@ -144,7 +145,12 @@ def predict(request: PredictionRequest):
         # `model_dump()` preserva el orden de declaración de FeatureReading,
         # que ya está alineado con ese orden.
         df_input = pd.DataFrame([reading.model_dump() for reading in request.features])
-        prediction = model.predict(df_input)
+        # mlflow.pyfunc.PyFuncModel.predict() declara PyFuncOutput (una union
+        # que incluye tipos no indexables, p. ej. str/dict) porque cubre
+        # cualquier flavor de modelo -- el DLinear registrado aquí siempre
+        # devuelve un np.ndarray (ver core_ml/src/mlflow_utils.py), de forma
+        # consistente con el resto de este endpoint.
+        prediction = cast(np.ndarray, model.predict(df_input))
         # prediction tiene forma (1, pred_len): una sola ventana de entrada,
         # pred_len valores futuros (1 en el caso histórico de un solo paso,
         # >1 para un horizonte multi-step -- ver
