@@ -19,7 +19,7 @@ def mlflow_local_registry(tmp_path):
 
 def _log_and_register(model_name: str, metric_value: float) -> str:
     with mlflow.start_run():
-        mlflow.log_metric("final_val_mse", metric_value)
+        mlflow.log_metric("final_test_mse", metric_value)
         info = mlflow.pyfunc.log_model(
             artifact_path="model",
             python_model=_DummyModel(),

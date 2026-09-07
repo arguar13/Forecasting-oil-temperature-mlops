@@ -30,7 +30,14 @@ configure_logging()
 logger = get_logger(__name__)
 
 PRODUCTION_ALIAS = "production"
-DEFAULT_METRIC_KEY = "final_val_mse"  # menor es mejor (MSE de validación)
+# final_test_mse (no final_val_mse): val ya decidió el learning rate
+# (Optuna) y qué checkpoint restaurar (early stopping), así que un candidato
+# puede "verse bien" en val precisamente porque el proceso de selección lo
+# empujó ahí. test nunca influyó en nada de eso -- es la única estimación de
+# error que este pipeline produce que no está contaminada por su propio
+# proceso de selección de modelo, y por eso es la que decide qué llega a
+# producción.
+DEFAULT_METRIC_KEY = "final_test_mse"  # menor es mejor (MSE de test, en °C^2)
 
 
 def _latest_version(client: MlflowClient, model_name: str) -> ModelVersion:

@@ -2,6 +2,7 @@ import argparse
 import os
 import random
 
+import joblib
 import mlflow
 import numpy as np
 import optuna
@@ -58,6 +59,14 @@ class ModelTrainer:
             os.path.join(artifact_dir, "train_tensors.pt"), weights_only=True
         )
         X_val, y_val = torch.load(os.path.join(artifact_dir, "val_tensors.pt"), weights_only=True)
+        # test_tensors.pt existia desde data_processing.py pero nada lo
+        # cargaba: el modelo nunca se evaluaba contra un holdout de verdad,
+        # solo contra val (usado tambien para early stopping/seleccion de
+        # checkpoint, asi que no es un holdout limpio). Ver evaluate_test_set
+        # mas abajo, que es lo que finalmente lo usa.
+        X_test, y_test = torch.load(
+            os.path.join(artifact_dir, "test_tensors.pt"), weights_only=True
+        )
 
         self.n_features = X_train.shape[2]
         self.seq_len = X_train.shape[1]
@@ -70,6 +79,9 @@ class ModelTrainer:
         )
         self.val_loader = DataLoader(
             TensorDataset(X_val, y_val), batch_size=batch_size, shuffle=False
+        )
+        self.test_loader = DataLoader(
+            TensorDataset(X_test, y_test), batch_size=batch_size, shuffle=False
         )
 
     def optimize_hyperparameters(self, n_trials=3) -> float:
@@ -110,13 +122,16 @@ class ModelTrainer:
         logger.info(f"Mejor Learning Rate encontrado: {best_lr:.5f}")
         return best_lr
 
-    def train(self, best_lr: float, epochs: int = 25, patience: int = 5) -> tuple[str, float]:
+    def train(
+        self, best_lr: float, epochs: int = 25, patience: int = 5
+    ) -> tuple[str, float, nn.Module]:
         """Bucle de entrenamiento principal con Early Stopping.
 
         Loguea métricas por época en el run de MLflow activo y devuelve la
         ruta del state_dict exportado (artefacto transitorio, no el producto
-        final -- el producto final es la versión registrada en MLflow) junto
-        con la mejor pérdida de validación alcanzada.
+        final -- el producto final es la versión registrada en MLflow), la
+        mejor pérdida de validación alcanzada, y el modelo restaurado a ese
+        mejor checkpoint (para evaluate_test_set, sin releerlo de disco).
         """
         logger.info(f"Entrenando modelo DLinear final en {device}...")
         model = DLinear(
@@ -184,7 +199,64 @@ class ModelTrainer:
         model_export_path = os.path.join(self.artifact_dir, "dlinear_model.pth")
         torch.save(model.state_dict(), model_export_path)
         logger.info(f"Entrenamiento completado. State dict exportado a {model_export_path}")
-        return model_export_path, best_val_loss
+        return model_export_path, best_val_loss, model
+
+    def evaluate_test_set(self, model: nn.Module, scaler_y_path: str) -> dict[str, float]:
+        """Evalúa el modelo final contra el holdout de test.
+
+        Es la única evaluación de este pipeline que no influyó de ninguna
+        forma en qué modelo se entrenó ni en qué checkpoint se eligió: train
+        ajusta pesos, val decide el learning rate (Optuna) y selecciona el
+        mejor checkpoint (early stopping). test nunca se toca hasta este
+        punto -- es lo que hace que estos números sean una estimación
+        honesta de error, no una que el propio proceso de selección ya
+        optimizó indirectamente.
+
+        Las métricas se devuelven en la unidad real del target (°C de
+        temperatura de aceite), no en la escala normalizada del
+        StandardScaler: un MSE=0.005 en unidades escaladas no le dice nada a
+        un humano ni a un dashboard sobre cuántos grados de error tiene el
+        modelo en la práctica.
+        """
+        scaler_y = joblib.load(scaler_y_path)
+
+        model.eval()
+        all_preds: list[np.ndarray] = []
+        all_targets: list[np.ndarray] = []
+        with torch.no_grad():
+            for x_b, y_b in self.test_loader:
+                preds = model(x_b.to(device)).cpu().numpy()
+                all_preds.append(preds)
+                all_targets.append(y_b.numpy())
+
+        preds = np.concatenate(all_preds, axis=0)
+        targets = np.concatenate(all_targets, axis=0)
+
+        # scaler_y se ajustó sobre una sola columna (el target); inverse_transform
+        # espera (N, 1), así que cada paso del horizonte se desescala por
+        # separado y se reensambla en la forma (N, pred_len) original.
+        original_shape = preds.shape
+        preds_original = scaler_y.inverse_transform(preds.reshape(-1, 1)).reshape(original_shape)
+        targets_original = scaler_y.inverse_transform(targets.reshape(-1, 1)).reshape(
+            original_shape
+        )
+
+        errors = preds_original - targets_original
+        mse = float(np.mean(errors**2))
+        mae = float(np.mean(np.abs(errors)))
+        rmse = float(np.sqrt(mse))
+
+        # MAPE divide por targets_original, y la temperatura de aceite puede
+        # acercarse a cero (no hay garantía física de que "cerca de cero" sea
+        # raro en este dataset, a diferencia de, por ejemplo, un precio). Un
+        # epsilon evita un ZeroDivisionError/inf silencioso, pero el número
+        # resultante hay que leerlo con cautela si una parte relevante de
+        # los targets del holdout está cerca de cero -- MAPE asume
+        # implícitamente que eso no pasa, y aquí no está garantizado.
+        epsilon = 1e-3
+        mape = float(np.mean(np.abs(errors) / np.maximum(np.abs(targets_original), epsilon)) * 100)
+
+        return {"test_mse": mse, "test_mae": mae, "test_rmse": rmse, "test_mape": mape}
 
 
 if __name__ == "__main__":
@@ -242,10 +314,29 @@ if __name__ == "__main__":
         best_lr = trainer.optimize_hyperparameters(n_trials=args.n_trials)
         mlflow.log_param("best_lr", best_lr)
 
-        model_export_path, best_val_loss = trainer.train(
+        model_export_path, best_val_loss, best_model = trainer.train(
             best_lr=best_lr, epochs=args.epochs, patience=args.patience
         )
         mlflow.log_metric("final_val_mse", best_val_loss)
+
+        test_metrics = trainer.evaluate_test_set(
+            best_model, scaler_y_path=os.path.join(args.artifact_dir, "scaler_y.pkl")
+        )
+        mlflow.log_metrics(
+            {
+                "final_test_mse": test_metrics["test_mse"],
+                "final_test_mae": test_metrics["test_mae"],
+                "final_test_rmse": test_metrics["test_rmse"],
+                "final_test_mape": test_metrics["test_mape"],
+            }
+        )
+        logger.info(
+            "test_set_evaluated",
+            test_mse=test_metrics["test_mse"],
+            test_mae=test_metrics["test_mae"],
+            test_rmse=test_metrics["test_rmse"],
+            test_mape=test_metrics["test_mape"],
+        )
 
         model_version = log_and_register_model(
             model_state_dict_path=model_export_path,
