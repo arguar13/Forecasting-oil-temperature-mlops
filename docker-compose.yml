@@ -40,10 +40,11 @@ services:
       # agotar el presupuesto de espera, no por un servicio realmente roto.
       retries: 20
 
-  # "La falsa nube": simula S3 (artefactos de modelo + datos DVC), SQS
-  # (eventos de batch inference) y Secrets Manager (credenciales), todo en un
-  # único contenedor. La app y los tests de integración le apuntan a esto en
-  # vez de a AWS real -- mismo API, cero costo, cero riesgo.
+  # "La falsa nube": simula S3 (artefactos de modelo + datos DVC), SQS,
+  # Secrets Manager (credenciales) y CloudWatch (heartbeat del CronJob de
+  # batch inference, ver terraform/alarms.tf), todo en un único contenedor.
+  # La app y los tests de integración le apuntan a esto en vez de a AWS
+  # real -- mismo API, cero costo, cero riesgo.
   localstack:
     # Pineado a la última tag Community (SemVer) pre-unificación: desde
     # marzo 2026 LocalStack fusionó Community+Pro en una imagen "LocalStack
@@ -53,7 +54,11 @@ services:
     # sin login, edition "community".
     image: localstack/localstack:4.14.0
     environment:
-      SERVICES: s3,sqs,secretsmanager
+      # cloudwatch: heartbeat de batch_inference.py (dead man's switch, ver
+      # terraform/alarms.tf) -- sin esto, _publish_heartbeat falla en local
+      # (best-effort, no tumba el batch, pero deja un warning permanente
+      # en los logs por algo que sí está soportado en LocalStack Community).
+      SERVICES: s3,sqs,secretsmanager,cloudwatch
       DEFAULT_REGION: us-east-1
       AWS_ACCESS_KEY_ID: test
       AWS_SECRET_ACCESS_KEY: test  # pragma: allowlist secret -- credencial fija de LocalStack, nunca se usa fuera del stack local

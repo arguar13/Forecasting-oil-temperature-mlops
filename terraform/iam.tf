@@ -35,6 +35,32 @@ resource "aws_iam_policy" "dlinear_api_s3_read" {
   })
 }
 
+# cloudwatch:PutMetricData no admite scoping por Resource (la API de
+# CloudWatch Metrics no tiene ARNs de recurso individuales para métricas
+# custom) -- Resource: "*" es lo unico que la accion soporta, no una
+# politica demasiado amplia por descuido. La Condition de abajo es la
+# forma real de acotarlo: solo puede publicar en el namespace de este
+# batch job, no en cualquier otro.
+resource "aws_iam_policy" "dlinear_batch_cloudwatch" {
+  name = "dlinear-batch-cloudwatch-heartbeat-policy"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect   = "Allow"
+        Action   = ["cloudwatch:PutMetricData"]
+        Resource = "*"
+        Condition = {
+          StringEquals = {
+            "cloudwatch:namespace" = "DLinearBatchInference"
+          }
+        }
+      }
+    ]
+  })
+}
+
 # IAM Role para que el Pod de la API pueda leer modelos de S3 (IRSA)
 module "iam_eks_role" {
   source  = "terraform-aws-modules/iam/aws//modules/iam-role-for-service-accounts-eks"
@@ -47,7 +73,8 @@ module "iam_eks_role" {
   # correcto en v5.x es `role_policy_arns`, y de paso permite acotar el
   # permiso al bucket real en vez de S3 completo.
   role_policy_arns = {
-    s3_read = aws_iam_policy.dlinear_api_s3_read.arn
+    s3_read    = aws_iam_policy.dlinear_api_s3_read.arn
+    cloudwatch = aws_iam_policy.dlinear_batch_cloudwatch.arn
   }
 
   oidc_providers = {

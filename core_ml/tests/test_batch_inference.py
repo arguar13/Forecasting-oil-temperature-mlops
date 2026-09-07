@@ -58,6 +58,10 @@ def service(monkeypatch):
 
     svc = BatchInferenceService()
     svc.model = _FakePyfuncModel()
+    # Mismo motivo que el monkeypatch de arriba, pero para el heartbeat de
+    # CloudWatch (_publish_heartbeat): un cliente boto3 real sin credenciales
+    # válidas contra un endpoint real haría esperar el timeout de red.
+    monkeypatch.setattr(svc.cloudwatch_client, "put_metric_data", lambda **_: {})
     return svc
 
 
@@ -118,6 +122,73 @@ def test_process_batch_scores_and_uploads_predictions(monkeypatch, service):
     assert list(result_df.columns) == ["Prediction"]
     assert len(result_df) == n_rows - service.seq_len + 1
     assert (result_df["Prediction"] == 42.5).all()
+
+
+def test_process_batch_publishes_a_heartbeat_on_success(monkeypatch, service):
+    n_rows = service.seq_len + 5
+    df = _valid_batch_df(n_rows)
+    payload = df.to_csv(index=False).encode()
+
+    monkeypatch.setattr(
+        service.s3_client, "get_object", lambda Bucket, Key: {"Body": _FakeBody(payload)}
+    )
+    monkeypatch.setattr(service.s3_client, "put_object", lambda **_: None)
+
+    heartbeats = []
+    monkeypatch.setattr(
+        service.cloudwatch_client,
+        "put_metric_data",
+        lambda **kwargs: heartbeats.append(kwargs),
+    )
+
+    service.process_batch()
+
+    assert len(heartbeats) == 1
+    call = heartbeats[0]
+    assert call["Namespace"] == "DLinearBatchInference"
+    assert call["MetricData"][0]["MetricName"] == "InferenceSuccess"
+    assert call["MetricData"][0]["Value"] == 1.0
+
+
+def test_process_batch_does_not_publish_a_heartbeat_when_scoring_fails(monkeypatch, service):
+    short_df = _valid_batch_df(service.seq_len - 1)
+    payload = short_df.to_csv(index=False).encode()
+    monkeypatch.setattr(
+        service.s3_client, "get_object", lambda Bucket, Key: {"Body": _FakeBody(payload)}
+    )
+
+    heartbeats = []
+    monkeypatch.setattr(
+        service.cloudwatch_client,
+        "put_metric_data",
+        lambda **kwargs: heartbeats.append(kwargs),
+    )
+
+    with pytest.raises(DataContractError):
+        service.process_batch()
+
+    # Ni un batch que nunca llega a subir nada debe fingir un heartbeat de éxito.
+    assert heartbeats == []
+
+
+def test_heartbeat_failure_does_not_fail_an_otherwise_successful_batch(monkeypatch, service):
+    n_rows = service.seq_len + 5
+    df = _valid_batch_df(n_rows)
+    payload = df.to_csv(index=False).encode()
+
+    monkeypatch.setattr(
+        service.s3_client, "get_object", lambda Bucket, Key: {"Body": _FakeBody(payload)}
+    )
+    monkeypatch.setattr(service.s3_client, "put_object", lambda **_: None)
+
+    def _boom(**_):
+        raise ConnectionError("CloudWatch inalcanzable")
+
+    monkeypatch.setattr(service.cloudwatch_client, "put_metric_data", _boom)
+
+    # No debe lanzar: el heartbeat es best-effort, igual que
+    # publish_batch_inference_completed.
+    service.process_batch()
 
 
 def test_process_batch_names_columns_per_horizon_step_for_multi_step_model(monkeypatch, service):

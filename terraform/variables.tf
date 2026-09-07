@@ -48,3 +48,12 @@ variable "operator_user_name" {
   type        = string
   default     = "dlinear-mlops-admin"
 }
+
+# Sin default a propósito (como git_repo_token en el proyecto 611): un
+# email de alerta wrong-but-present es peor que uno explícitamente
+# requerido -- nadie debería heredar un destinatario de alertas por accidente.
+# Ver terraform/alarms.tf.
+variable "alert_email" {
+  description = "Email que recibe las alertas de CloudWatch (dead man's switch del CronJob de batch inference). Suscripción SNS pendiente de confirmación manual (AWS envía un email de verificación al aplicar)."
+  type        = string
+}

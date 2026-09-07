@@ -37,10 +37,15 @@ _RESILIENT_RETRY = retry(
 )
 
 
+CLOUDWATCH_NAMESPACE = "DLinearBatchInference"
+CLOUDWATCH_HEARTBEAT_METRIC = "InferenceSuccess"
+
+
 class BatchInferenceService:
     def __init__(self):
         aws_endpoint = os.getenv("AWS_ENDPOINT_URL")
         self.s3_client = boto3.client("s3", endpoint_url=aws_endpoint)
+        self.cloudwatch_client = boto3.client("cloudwatch", endpoint_url=aws_endpoint)
         self.bucket = os.getenv("MODEL_BUCKET_NAME", "mlops-portafolio-proj3-models")
         self.input_key = os.getenv("BATCH_INPUT_KEY", "batch/input_data.csv")
         self.output_key = os.getenv("BATCH_OUTPUT_KEY", "batch/predictions_output.csv")
@@ -72,6 +77,32 @@ class BatchInferenceService:
     def _upload_output(self, body: str) -> None:
         logger.info("batch_output_upload_started", bucket=self.bucket, key=self.output_key)
         self.s3_client.put_object(Bucket=self.bucket, Key=self.output_key, Body=body)
+
+    def _publish_heartbeat(self) -> None:
+        """Dead man's switch: kubernetes/base/cronjob.yaml corre este proceso
+        una vez al día y termina, así que "alertar cuando falla" no puede
+        depender de que el propio proceso que falló siga vivo lo suficiente
+        para reportarlo -- eso deja sin cubrir justo los modos de falla más
+        duros (OOMKilled, imagen que nunca arranca, backoffLimit agotado
+        antes de correr una sola vez). En vez de eso, cada corrida EXITOSA
+        publica este metric; el CloudWatch Alarm de terraform/alarms.tf se
+        dispara si no llega ninguno dentro de la ventana esperada -- una
+        ausencia de éxito, no una presencia de fallo, que cubre todo lo
+        anterior sin excepción.
+
+        Best-effort, igual que publish_batch_inference_completed (events.py):
+        un fallo al publicar el heartbeat no debe hacer fallar un batch que
+        sí terminó bien.
+        """
+        try:
+            self.cloudwatch_client.put_metric_data(
+                Namespace=CLOUDWATCH_NAMESPACE,
+                MetricData=[
+                    {"MetricName": CLOUDWATCH_HEARTBEAT_METRIC, "Value": 1.0, "Unit": "Count"}
+                ],
+            )
+        except Exception as exc:
+            logger.warning("heartbeat_publish_failed", error=str(exc))
 
     def process_batch(self):
         if self.model is None:
@@ -121,6 +152,7 @@ class BatchInferenceService:
             model_name=self.model_name,
             model_alias=self.model_alias,
         )
+        self._publish_heartbeat()
 
 
 if __name__ == "__main__":
