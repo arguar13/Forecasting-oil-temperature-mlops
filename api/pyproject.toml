@@ -26,6 +26,14 @@ scikit-learn = "^1.5.0"
 # entrypoint del CronJob de batch inference (core_ml/src/batch_inference.py
 # -> events.py), que sí lo necesita para publicar eventos en Kafka.
 kafka-python = "^3.0.11"
+# Tampoco los usa api/main.py directamente -- la misma imagen sirve como
+# entrypoint del Deployment stream-consumer
+# (core_ml/src/monitoring/stream_consumer.py, mitigation.py, drift_store.py),
+# que sí los necesita: psycopg2 para el log de predicciones/mitigación en
+# RDS, requests para la llamada acotada a la API de Pipeline Trigger de
+# GitLab.
+psycopg2-binary = "^2.9.9"
+requests = "^2.32.0"
 
 # Observabilidad y resiliencia (Fase 4)
 structlog = "^26.1.0"

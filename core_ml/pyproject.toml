@@ -35,6 +35,9 @@ optuna = "^3.6.0"
 pydantic = "^2.9.0"
 numpy = ">=1.26.0,<3.0.0"
 pyyaml = "^6.0.2"
+# core_ml/src/monitoring/mitigation.py -- llamada acotada (timeout, sin
+# reintento) a la API de Pipeline Trigger de GitLab.
+requests = "^2.32.0"
 
 # Eventos (Fase 3: notifica finalización de batch inference vía Kafka)
 kafka-python = "^3.0.11"
