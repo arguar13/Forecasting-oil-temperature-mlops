@@ -150,7 +150,12 @@ class StreamConsumer:
 
         self.window: deque[dict] = deque(maxlen=SEQ_LEN)
 
-        self.kinesis = boto3.client("kinesis")
+        # Same AWS_ENDPOINT_URL convention batch_inference.py already uses:
+        # unset in production (real Kinesis), pointed at LocalStack
+        # (http://localstack:4566) for the local/docker-compose stack and
+        # for integration tests - the only way this consumer's Kinesis
+        # calls can be exercised without a real AWS account.
+        self.kinesis = boto3.client("kinesis", endpoint_url=os.getenv("AWS_ENDPOINT_URL"))
         self.stream_name = _stream_name()
 
         self.db_conn = psycopg2.connect(drift_store.dsn_from_env())

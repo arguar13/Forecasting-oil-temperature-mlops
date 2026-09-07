@@ -2,8 +2,8 @@
 # Fase 3: Entorno Local, Contenedores y Simulación de Nube.
 #
 # Replica el ecosistema completo de AWS localmente, sin costo ni credenciales
-# reales: LocalStack simula S3/SQS/Secrets Manager ("la falsa nube"), Postgres
-# simula RDS, y Kafka + MLflow + la API corren como en producción. Todos los
+# reales: LocalStack simula S3/SQS/Secrets Manager/Kinesis ("la falsa nube"),
+# Postgres simula RDS, y Kafka + MLflow + la API corren como en producción. Todos los
 # componentes se validan aquí -- con `docker-compose up` y con los tests de
 # Testcontainers en `core_ml/tests/integration/` -- antes de tocar AWS real.
 # ==============================================================================
@@ -58,7 +58,12 @@ services:
       # terraform/alarms.tf) -- sin esto, _publish_heartbeat falla en local
       # (best-effort, no tumba el batch, pero deja un warning permanente
       # en los logs por algo que sí está soportado en LocalStack Community).
-      SERVICES: s3,sqs,secretsmanager,cloudwatch
+      # kinesis: scripts/sensor_simulator.py y
+      # core_ml/src/monitoring/stream_consumer.py -- sin esto, la única
+      # forma de probar el código de streaming sería contra el Kinesis
+      # real de terraform/kinesis.tf, exactamente lo que este stack local
+      # existe para evitar.
+      SERVICES: s3,sqs,secretsmanager,cloudwatch,kinesis
       DEFAULT_REGION: us-east-1
       AWS_ACCESS_KEY_ID: test
       AWS_SECRET_ACCESS_KEY: test  # pragma: allowlist secret -- credencial fija de LocalStack, nunca se usa fuera del stack local
@@ -176,6 +181,48 @@ services:
       retries: 40
       start_period: 20s
 
+  # Consumidor de Kinesis (core_ml/src/monitoring/stream_consumer.py):
+  # inferencia online a 1 hora vista + detección de drift por CUSUM. Perfil
+  # "tools" (no arranca con `make up`) -- es un proceso de larga duración
+  # cuyo sentido depende de que algo esté publicando lecturas primero, así
+  # que se levanta a demanda: `make stream-local` (ver Makefile) orquesta
+  # crear el stream, este servicio, y el simulador en la secuencia correcta.
+  stream-consumer:
+    profiles: ["tools"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: python -m src.monitoring.stream_consumer
+    environment:
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      MODEL_NAME: dlinear-ett-forecaster
+      MODEL_ALIAS: production
+      SENSOR_STREAM_NAME: sensor-telemetry-local
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test  # pragma: allowlist secret -- credencial fija de LocalStack, nunca se usa fuera del stack local
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_ENDPOINT_URL: http://localstack:4566
+      MLFLOW_S3_ENDPOINT_URL: http://localstack:4566
+      # drift_store.py / mitigation.py: mismo Postgres que ya usa mlflow,
+      # segundo schema. RDS_ENDPOINT reutiliza el formato host:port real
+      # (ver kubernetes/base/mlflow.yaml) aunque aquí "RDS" sea el propio
+      # servicio postgres de este stack.
+      RDS_ENDPOINT: postgres:5432
+      MLFLOW_DB_USERNAME: mlopsadmin
+      MLFLOW_DB_PASSWORD: localpassword123  # pragma: allowlist secret -- credencial fija del stack local
+      # Sin GITLAB_*: mitigation.py falla su llamada HTTP con
+      # RuntimeError, la captura, la registra como "failed" en
+      # monitoring.mitigation_events y sigue -- exactamente el
+      # comportamiento correcto para probar detección de drift local sin
+      # disparar un pipeline de GitLab real.
+    depends_on:
+      mlflow:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+
   # Entrenamiento local (Fase E) -- corre en Linux, igual que el job
   # "train_model" de CI (.gitlab-ci.yml), para que MLflow persista rutas de
   # artefacto con "/" en vez del separador nativo del host (ver
@@ -200,6 +247,13 @@ services:
       AWS_SECRET_ACCESS_KEY: test  # pragma: allowlist secret -- credencial fija de LocalStack, nunca se usa fuera del stack local
       AWS_DEFAULT_REGION: us-east-1
       MLFLOW_S3_ENDPOINT_URL: http://localstack:4566
+      # scripts/sensor_simulator.py corre puntualmente en este mismo
+      # contenedor (`docker compose run --rm trainer python -m
+      # scripts.sensor_simulator ...`, ver Makefile::stream-local) --
+      # necesita las mismas dos variables que stream-consumer para hablarle
+      # a Kinesis vía LocalStack.
+      AWS_ENDPOINT_URL: http://localstack:4566
+      SENSOR_STREAM_NAME: sensor-telemetry-local
     depends_on:
       mlflow:
         condition: service_healthy

@@ -18,6 +18,7 @@ PROJECTS   := $(API_DIR) $(CORE_DIR)
 	hooks pre-commit-run ci clean \
 	dvc-pull dvc-push dvc-status data-toy data-raw train-toy quality-gate mlflow-ui \
 	up down restart logs ps \
+	stream-up stream-replay stream-logs stream-local \
 	ci-local ci-local-list \
 	runner-register runner-up runner-down runner-logs runner-status
 
@@ -166,6 +167,25 @@ up: ## Levanta el stack local completo (Postgres, LocalStack, Kafka, MLflow, API
 
 down: ## Detiene y elimina el stack local (conserva los volúmenes de datos)
 	docker compose down
+
+# ------------------------------------------------------------------------------
+# Streaming local (Kinesis vía LocalStack): la única forma de ejercitar
+# scripts/sensor_simulator.py y core_ml/src/monitoring/stream_consumer.py sin
+# tocar el Kinesis real de terraform/kinesis.tf. Requiere `make up` +
+# `make train-toy` + `make quality-gate` primero -- stream-consumer necesita
+# una versión "production" real para cargar al arrancar.
+# ------------------------------------------------------------------------------
+stream-up: ## Levanta el consumidor de Kinesis (perfil "tools", no arranca con `make up`)
+	docker compose --profile tools up -d --build stream-consumer
+
+stream-replay: ## Reproduce el dataset toy hacia Kinesis a paso lento (ejercita el trigger del consumidor)
+	docker compose --profile tools run --rm trainer python -m scripts.sensor_simulator --dataset toy --delay-seconds 0.2
+
+stream-logs: ## Sigue los logs del consumidor (verdictos CUSUM, predicciones registradas, mitigación)
+	docker compose logs -f stream-consumer
+
+stream-local: up train-toy quality-gate stream-up stream-replay ## Todo el ciclo end-to-end de streaming, desde cero
+	@echo "stream-consumer corriendo. Ver 'make stream-logs' para el veredicto de drift."
 
 restart: down up ## Reinicia el stack local completo
 

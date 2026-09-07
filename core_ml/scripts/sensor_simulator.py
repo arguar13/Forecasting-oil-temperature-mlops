@@ -70,7 +70,10 @@ def replay(
     end_row = len(df) if limit is None else min(start_row + limit, len(df))
     window = df.iloc[start_row:end_row]
 
-    client = kinesis_client or boto3.client("kinesis")
+    # Same AWS_ENDPOINT_URL convention batch_inference.py uses for S3 -
+    # unset against real Kinesis in production, pointed at LocalStack for
+    # local runs and integration tests.
+    client = kinesis_client or boto3.client("kinesis", endpoint_url=os.getenv("AWS_ENDPOINT_URL"))
     stream_name = _stream_name()
 
     published = 0

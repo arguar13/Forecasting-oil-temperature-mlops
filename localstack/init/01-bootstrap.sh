@@ -9,6 +9,7 @@ set -e
 BUCKET="mlops-portafolio-proj3-models"
 QUEUE="batch-inference-events"
 SECRET="dlinear/mlflow-db-credentials"  # pragma: allowlist secret -- nombre del secreto, no un valor
+STREAM="sensor-telemetry-local"
 
 echo "[localstack-init] Creando bucket S3 s3://${BUCKET} ..."
 awslocal s3 mb "s3://${BUCKET}"
@@ -21,5 +22,9 @@ echo "[localstack-init] Creando secreto ${SECRET} en Secrets Manager ..."
 awslocal secretsmanager create-secret \
   --name "${SECRET}" \
   --secret-string '{"username":"mlopsadmin","password":"localpassword123"}'  # pragma: allowlist secret -- credencial fija del stack local, nunca se usa fuera de docker-compose
+
+echo "[localstack-init] Creando Kinesis Data Stream ${STREAM} ..."
+awslocal kinesis create-stream --stream-name "${STREAM}" --shard-count 1
+awslocal kinesis wait stream-exists --stream-name "${STREAM}"
 
 echo "[localstack-init] Bootstrap completado."
