@@ -297,6 +297,13 @@ cd core_ml && poetry run python -m src.quality_gate
 
 The local FastAPI service (targeting the docker-compose MLflow stack) resolves the model by name and `production` alias on startup — no manual artifact copying. Once you're confident, run the same steps against the full dataset (`make data-raw` + `poetry run python -m src.train --dataset raw`).
 
+With a `production` model in place, exercise the streaming side the same way — [`scripts/sensor_simulator.py`](core_ml/scripts/sensor_simulator.py) replaying readings onto the LocalStack Kinesis stream and [`stream_consumer.py`](core_ml/src/monitoring/stream_consumer.py) consuming them, both against the exact code path production runs, no real AWS account involved:
+
+```bash
+make stream-local   # everything from a cold stack: up -> train-toy -> quality-gate -> stream-up -> stream-replay
+make stream-logs     # follow the consumer's CUSUM verdicts and mitigation attempts
+```
+
 ### 5. Validate Before Committing
 
 The `Makefile` is the single entry point for every quality check — the exact same targets run locally (via git hooks) and in CI:
@@ -315,6 +322,14 @@ make ci                     # everything above, in one shot -- identical to the 
 ```
 
 `pre-commit` (installed by `make hooks`) enforces this automatically: a commit is rejected if formatting, linting, type checking, tests, YAML syntax, or a leaked secret fails. See [Code Quality & Shift-Left Validation](#code-quality--shift-left-validation) below.
+
+Terraform and Kubernetes changes get the same treatment — no AWS credentials, no cluster, no cost:
+
+```bash
+make tf-fmt        # terraform fmt -check
+make tf-validate     # terraform init -backend=false + validate (downloads providers/modules only)
+make k8s-build        # kustomize-renders the production overlay - the exact manifests ArgoCD would apply
+```
 
 ### 6. Validate the Full CI/CD Pipeline, Locally
 

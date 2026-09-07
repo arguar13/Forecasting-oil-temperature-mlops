@@ -297,6 +297,13 @@ cd core_ml && poetry run python -m src.quality_gate
 
 El servicio local de FastAPI (apuntando al stack de MLflow de docker-compose) resuelve el modelo por nombre y alias `production` al arrancar — sin copiar artefactos manualmente. Una vez que tengas confianza, corre los mismos pasos contra el dataset completo (`make data-raw` + `poetry run python -m src.train --dataset raw`).
 
+Con un modelo `production` en su lugar, ejercita el lado de streaming de la misma forma — [`scripts/sensor_simulator.py`](core_ml/scripts/sensor_simulator.py) reproduciendo lecturas hacia el stream de Kinesis en LocalStack y [`stream_consumer.py`](core_ml/src/monitoring/stream_consumer.py) consumiéndolas, ambos contra el mismo camino de código que corre en producción, sin ninguna cuenta real de AWS de por medio:
+
+```bash
+make stream-local   # todo desde un stack en frío: up -> train-toy -> quality-gate -> stream-up -> stream-replay
+make stream-logs     # sigue los veredictos CUSUM del consumidor y los intentos de mitigación
+```
+
 ### 5. Validar Antes de Comitear
 
 El `Makefile` es el único punto de entrada para toda verificación de calidad — exactamente los mismos targets corren localmente (vía git hooks) y en el CI:
@@ -315,6 +322,14 @@ make ci                     # todo lo anterior, de una sola vez -- idéntico al 
 ```
 
 `pre-commit` (instalado por `make hooks`) impone esto automáticamente: un commit se rechaza si falla el formateo, el linting, el chequeo de tipos, los tests, la sintaxis YAML, o si se detecta un secreto filtrado. Ver [Calidad de Código y Validación Shift-Left](#calidad-de-código-y-validación-shift-left) más abajo.
+
+Los cambios de Terraform y Kubernetes reciben el mismo trato — sin credenciales de AWS, sin clúster, sin costo:
+
+```bash
+make tf-fmt        # terraform fmt -check
+make tf-validate     # terraform init -backend=false + validate (solo descarga providers/módulos)
+make k8s-build        # renderiza con kustomize el overlay de producción - los manifiestos exactos que ArgoCD aplicaría
+```
 
 ### 6. Validar el Pipeline de CI/CD Completo, Localmente
 
