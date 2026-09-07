@@ -19,6 +19,7 @@ PROJECTS   := $(API_DIR) $(CORE_DIR)
 	dvc-pull dvc-push dvc-status data-toy data-raw train-toy quality-gate mlflow-ui \
 	up down restart logs ps \
 	stream-up stream-replay stream-logs stream-local \
+	tf-fmt tf-validate k8s-build \
 	ci-local ci-local-list \
 	runner-register runner-up runner-down runner-logs runner-status
 
@@ -285,6 +286,22 @@ runner-logs: ## Sigue los logs del runner local (para ver qué job está ejecuta
 runner-status: ## Verifica que el runner local está corriendo y conectado a GitLab
 	docker ps --filter name=gitlab-runner-local
 	docker run --rm -v gitlab-runner-config:/etc/gitlab-runner gitlab/gitlab-runner:latest verify
+
+# ------------------------------------------------------------------------------
+# Terraform / Kubernetes -- validación local, sin credenciales de AWS ni
+# cluster real. `terraform:fmt` (.gitlab-ci.yml) corre exactamente
+# `terraform fmt -check`; estos targets dan la misma señal antes de hacer
+# push, no solo cuando CI ya la reporta.
+# ------------------------------------------------------------------------------
+tf-fmt: ## Verifica el formato de Terraform (sin credenciales AWS)
+	terraform -chdir=terraform fmt -check -diff -recursive
+
+tf-validate: ## Valida sintaxis y consistencia interna de Terraform (init local, sin backend remoto ni AWS)
+	terraform -chdir=terraform init -backend=false -input=false
+	terraform -chdir=terraform validate
+
+k8s-build: ## Renderiza el overlay de producción (kustomize, sin cluster real)
+	kubectl kustomize kubernetes/overlays/production
 
 # ------------------------------------------------------------------------------
 # Git hooks
