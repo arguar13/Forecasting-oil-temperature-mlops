@@ -135,6 +135,12 @@ terraform:fmt:
   script:
     - cd $TF_ROOT
     - terraform fmt -check
+  # AUTO_RETRAIN pipelines (mitigation.py's GitLab Pipeline Trigger call,
+  # ver core_ml/src/monitoring/mitigation.py) corren solo train_model +
+  # quality_gate -- ni terraform ni la imagen de la API cambiaron, así
+  # que el resto del pipeline normal no tiene nada que aportar.
+  rules:
+    - if: '$AUTO_RETRAIN != "true"'
 
 # ========================
 # Validación Shift-Left (Fase 1: misma interfaz que en local)
@@ -163,6 +169,8 @@ python:quality:
   script:
     - make install
     - make ci
+  rules:
+    - if: '$AUTO_RETRAIN != "true"'
 
 security:trivy:
   stage: quality
@@ -204,6 +212,8 @@ security:trivy:
         --exit-code 1 --severity HIGH,CRITICAL --ignorefile /repo/.trivyignore
         --skip-dirs "**/.terraform,**/mlruns,**/mlartifacts,**/.claude"
         --skip-files "**/*.tfstate,**/*.tfstate.*" /repo
+  rules:
+    - if: '$AUTO_RETRAIN != "true"'
 
 # ========================
 # Fase 3: Testcontainers (Postgres/Kafka/LocalStack efímeros + docker-compose.yml)
@@ -230,6 +240,8 @@ integration_tests:
     DOCKER_HOST: tcp://docker:2375
     DOCKER_TLS_CERTDIR: ""
   allow_failure: true
+  rules:
+    - if: '$AUTO_RETRAIN != "true"'
   # Mismas dependencias que train_model/quality_gate (core_ml completo, con
   # dev group) -- comparten cache key para no descargar 3 veces los mismos
   # ~2GB de wheels (torch, cuda) entre estos 3 jobs.
@@ -300,7 +312,8 @@ terraform:plan:
   # es casi gratis (un diff de nombres de archivo contra el commit
   # anterior, no clona ni ejecuta nada de más).
   rules:
-    - changes:
+    - if: '$AUTO_RETRAIN != "true"'
+      changes:
         - terraform/**/*
 
 terraform:apply:
@@ -320,7 +333,7 @@ terraform:apply:
     - terraform init
     - terraform apply -auto-approve tfplan
   rules:
-    - if: $CI_COMMIT_BRANCH == "main"
+    - if: '$CI_COMMIT_BRANCH == "main" && $AUTO_RETRAIN != "true"'
       changes:
         - terraform/**/*
   # NO retry: se probó "retry: 2" para el caso de propagación de IAM (un
@@ -345,6 +358,19 @@ terraform:apply:
 # apunta al Service ClusterIP interno de MLflow (kubernetes/base/mlflow.yaml) --
 # por eso este job corre en el runner self-hosted dentro de la VPC
 # (kubernetes/gitlab-runner/), el único que puede resolver ese DNS interno.
+#
+# train_model y quality_gate son los ÚNICOS dos jobs de todo este pipeline
+# que SÍ corren en un pipeline AUTO_RETRAIN=true (disparado por
+# core_ml/src/monitoring/mitigation.py vía la API de Pipeline Trigger de
+# GitLab, junto con TRIGGER_SOURCE/TRIGGER_REASON/TRIGGER_MODEL_VERSION) --
+# su regla no necesita el `&& $AUTO_RETRAIN != "true"` que el resto de este
+# archivo sí tiene, porque un reentrenamiento automático es exactamente
+# "vuelve a correr estos dos jobs", nada más: ni terraform, ni las imágenes
+# Docker, ni el despliegue tienen nada que aportar a esa corrida. Si
+# quality_gate rechaza el candidato, el pipeline queda en rojo y
+# production nunca se toca -- ver ese script para la comparación
+# canary/shadow, y mitigation.py para el cooldown/techo que acota cuántas
+# veces esto puede dispararse solo.
 train_model:
   stage: train
   extends: .aws-auth
@@ -439,7 +465,7 @@ docker:build-push:
     # un tag flotante reintroduciría justo la ambigüedad que la tupla de
     # reproducibilidad de la Fase 2 existe para evitar.
   rules:
-    - if: $CI_COMMIT_BRANCH == "main"
+    - if: '$CI_COMMIT_BRANCH == "main" && $AUTO_RETRAIN != "true"'
 
 # Publica la imagen del MLflow Tracking Server que corre en producción
 # (kubernetes/base/mlflow.yaml), en su propio repositorio ECR
@@ -471,7 +497,7 @@ docker:build-push-mlflow:
     - docker build --cache-from "$ECR_REGISTRY/dlinear-mlflow-server:$PREVIOUS_TAG" -t $ECR_REGISTRY/dlinear-mlflow-server:$CI_COMMIT_SHA -f mlflow.Dockerfile .
     - docker push $ECR_REGISTRY/dlinear-mlflow-server:$CI_COMMIT_SHA
   rules:
-    - if: $CI_COMMIT_BRANCH == "main"
+    - if: '$CI_COMMIT_BRANCH == "main" && $AUTO_RETRAIN != "true"'
 
 # ========================
 # GitOps: CI nunca toca el cluster. Solo declara el nuevo estado deseado en
@@ -508,4 +534,4 @@ kubernetes:deploy:
     # repository" en Settings > CI/CD > Token Access.
     - git push "https://gitlab-ci-token:${CI_JOB_TOKEN}@${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git" HEAD:${CI_COMMIT_BRANCH}
   rules:
-    - if: $CI_COMMIT_BRANCH == "main"
+    - if: '$CI_COMMIT_BRANCH == "main" && $AUTO_RETRAIN != "true"'

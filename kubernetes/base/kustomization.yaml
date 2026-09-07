@@ -10,6 +10,7 @@ resources:
   - networkpolicy.yaml
   - cronjob.yaml
   - mlflow.yaml
+  - stream-consumer.yaml
 
 # Genera el ConfigMap con un sufijo hash derivado de su contenido: cualquier
 # cambio en estos valores produce un nombre nuevo, lo que fuerza un rollout
@@ -25,3 +26,13 @@ configMapGenerator:
       - BATCH_INPUT_KEY=batch/input_data.csv
       - BATCH_OUTPUT_KEY=batch/predictions_output.csv
       - KAFKA_BOOTSTRAP_SERVERS=kafka.dlinear-production.svc.cluster.local:9092
+      # core_ml/src/monitoring/stream_consumer.py -- nombre determinístico
+      # (terraform/kinesis.tf: "${project_name}-sensor-telemetry"), no
+      # depende de ningún output post-apply como RDS_ENDPOINT sí.
+      - SENSOR_STREAM_NAME=dlinear-forecast-cluster-sensor-telemetry
+      # core_ml/src/monitoring/mitigation.py -- API de Pipeline Trigger de
+      # GitLab. GITLAB_TRIGGER_TOKEN es la mitad sensible, entregada vía el
+      # Secret gitlab-trigger-credentials (kubernetes/base/stream-consumer.yaml).
+      - GITLAB_API_URL=https://gitlab.com/api/v4
+      - GITLAB_PROJECT_PATH=personal-group7745334/612-forecasting-oil-temperature-mlops
+      - GITLAB_REF=main

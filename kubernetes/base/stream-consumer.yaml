@@ -1,0 +1,82 @@
+# Consumidor de Kinesis (core_ml/src/monitoring/stream_consumer.py):
+# inferencia online a 1 hora vista + deteccion de drift por CUSUM sobre el
+# stream de scripts/sensor_simulator.py, mas el disparo acotado de
+# reentrenamiento automatico (mitigation.py) ante una alerta confirmada.
+#
+# Deployment, no CronJob (a diferencia de dlinear-batch-inference): este
+# workload mantiene un iterador de shard de Kinesis y una ventana deslizante
+# de 48 horas en memoria entre lecturas -- el mismo tipo de proceso de larga
+# duracion que dlinear-api, no un job que corre y termina.
+#
+# Credenciales de base de datos: reutiliza el MISMO Secret
+# `mlflow-db-credentials` que mlflow.yaml ya monta (mismo RDS, un segundo
+# schema -- ver drift_store.py), no uno nuevo. El token de trigger de
+# GitLab es un segundo Secret imperativo, mismo patron:
+#
+#   kubectl create secret generic gitlab-trigger-credentials \
+#     --namespace dlinear-production \
+#     --from-literal=token=<el mismo valor guardado en Secrets Manager, ver terraform/secrets.tf>
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: stream-consumer
+  labels:
+    app: stream-consumer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: stream-consumer
+  template:
+    metadata:
+      labels:
+        app: stream-consumer
+    spec:
+      serviceAccountName: dlinear-sa
+      containers:
+        - name: stream-consumer
+          image: dlinear-api:base
+          command: ["python", "-m", "src.monitoring.stream_consumer"]
+          envFrom:
+            - configMapRef:
+                name: dlinear-config
+          env:
+            - name: MLFLOW_DB_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: mlflow-db-credentials
+                  key: username
+            - name: MLFLOW_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mlflow-db-credentials
+                  key: password
+            - name: GITLAB_TRIGGER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: gitlab-trigger-credentials
+                  key: token
+          # stream_consumer.py escribe un timestamp en este archivo en cada
+          # poll de Kinesis -- mismo patron "el silencio es la senal" que la
+          # alarma de heartbeat de CloudWatch usa para el CronJob de batch
+          # (terraform/alarms.tf), aplicado aqui via un probe de Kubernetes
+          # porque un consumidor trabado (no caido) no produce ningun codigo
+          # de salida que Kubernetes pueda notar por su cuenta.
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - >-
+                  test $(( $(date +%s) - $(date -r /tmp/stream_consumer_heartbeat +%s
+                  2>/dev/null || echo 0) )) -lt 600
+            initialDelaySeconds: 60
+            periodSeconds: 60
+            failureThreshold: 3
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"

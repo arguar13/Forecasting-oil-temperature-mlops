@@ -120,3 +120,43 @@ spec:
     - ports:
         - protocol: TCP
           port: 443
+---
+# stream-consumer: como dlinear-batch, nunca sirve tráfico entrante (el
+# liveness probe es un `exec` local, no un puerto HTTP) -- niega TODO
+# ingress. Egress añade el puerto de RDS (drift_store.py: un segundo
+# schema en la misma base que usa mlflow) sobre el patrón ya establecido en
+# dlinear-batch-network-policy; el 443 sin restricción de IP ya cubre tanto
+# Kinesis (AWS) como la API de Pipeline Trigger de GitLab
+# (mitigation.py) -- ninguno de los dos tiene un rango de IP estable
+# fijable en un CIDR aquí.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: stream-consumer-network-policy
+spec:
+  podSelector:
+    matchLabels:
+      app: stream-consumer
+  policyTypes:
+    - Ingress
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - podSelector:
+            matchLabels:
+              app: mlflow
+      ports:
+        - protocol: TCP
+          port: 5000
+    - ports:
+        - protocol: TCP
+          port: 5432
+        - protocol: TCP
+          port: 443
