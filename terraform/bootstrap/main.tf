@@ -1,11 +1,11 @@
 # ==============================================================================
-# Bootstrap (Fase L/N de Guia_Completa_Ejecucion_Proyecto 612.docx)
+# Bootstrap
 #
 # Crea, con credenciales administrativas de un solo uso, los recursos que el
 # resto del proyecto (../*.tf) necesita para existir *antes* de su propio
-# `terraform init`: el backend remoto (S3 + DynamoDB), el secreto de RDS, y
-# un usuario IAM operador -- reemplaza los pasos manuales de AWS CLI/consola
-# que la guía documentaba, por Infraestructura como Código.
+# `terraform init`: el backend remoto (S3 + DynamoDB), la password de RDS, y
+# un usuario IAM operador -- todo como Infraestructura como Código, sin
+# pasos manuales de AWS CLI/consola.
 # ==============================================================================
 
 # ------------------------------------------------------------------------------
@@ -59,22 +59,14 @@ resource "aws_dynamodb_table" "tf_locks" {
 }
 
 # ------------------------------------------------------------------------------
-# Secreto de la password de RDS (../rds.tf lo lee por nombre exacto)
+# Password de RDS -- se genera acá una única vez y se pasa a mano como
+# var.db_password al stack principal (../rds.tf) y como valor del Secret de
+# Kubernetes (kubernetes/base/secret.yaml). Sin Secrets Manager de por medio:
+# un valor sensible, generado una vez, copiado a los dos lugares que lo usan.
 # ------------------------------------------------------------------------------
 resource "random_password" "db_password" {
   length  = 32
   special = false # Evita caracteres especiales incompatibles con la URI de conexión de PostgreSQL
-}
-
-resource "aws_secretsmanager_secret" "db_password" {
-  name = var.db_secret_name
-}
-
-resource "aws_secretsmanager_secret_version" "db_password" {
-  secret_id = aws_secretsmanager_secret.db_password.id
-  secret_string = jsonencode({
-    db_password = random_password.db_password.result
-  })
 }
 
 # ------------------------------------------------------------------------------
@@ -106,8 +98,9 @@ output "lock_table_name" {
   value = aws_dynamodb_table.tf_locks.name
 }
 
-output "db_secret_arn" {
-  value = aws_secretsmanager_secret.db_password.arn
+output "db_password" {
+  value     = random_password.db_password.result
+  sensitive = true
 }
 
 output "operator_access_key_id" {

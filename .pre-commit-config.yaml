@@ -1,126 +1,47 @@
-# Validación Shift-Left: un commit se rechaza automáticamente si falla
-# el linting, el formateo, el type checking, las pruebas, si se detecta un
-# secreto o si un archivo YAML es inválido.
+# Validación básica antes de cada commit: higiene de archivos, formato/lint
+# de Python (ruff) y las pruebas unitarias de cada subproyecto.
 #
 # Instalación local:
 #   pip install pre-commit  (o: pipx install pre-commit)
 #   make hooks
 #
-# Los hooks de mypy/pytest son locales porque necesitan las dependencias
-# reales de cada subproyecto (instaladas de forma determinista vía Poetry);
-# ruff/black/isort/bandit/yamllint corren en entornos aislados que gestiona
-# pre-commit, versionados con `rev:` para reproducibilidad.
+# En un entorno real de producción normalmente se agregarían además: un
+# scanner de secretos (detect-secrets), un linter de YAML (yamllint) y un
+# escaneo de vulnerabilidades de dependencias/imágenes (trivy o similar).
+# Se omiten aquí a propósito para mantener el pipeline simple mientras se
+# aprende -- son piezas que sumar más adelante, no una necesidad para que
+# el proyecto funcione.
 
 repos:
   # ---------------------------------------------------------
-  # Higiene general de archivos + validación de YAML/TOML
+  # Higiene general de archivos + validación de YAML/TOML/JSON
   # ---------------------------------------------------------
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v4.6.0
     hooks:
       - id: trailing-whitespace
       - id: end-of-file-fixer
-      - id: mixed-line-ending
-        args: ["--fix=lf"]
       - id: check-yaml
-        name: check-yaml (sintaxis válida)
-        args: ["--allow-multiple-documents"]
+        args: ["--allow-multiple-documents", "--unsafe"]
       - id: check-toml
       - id: check-json
       - id: check-added-large-files
         args: ["--maxkb=2048"]
       - id: check-merge-conflict
-      - id: check-case-conflict
-      - id: debug-statements
-      - id: detect-private-key
 
   # ---------------------------------------------------------
-  # YAML: estilo y buenas prácticas (GitLab CI, K8s, compose)
-  # ---------------------------------------------------------
-  - repo: https://github.com/adrienverge/yamllint
-    rev: v1.35.1
-    hooks:
-      - id: yamllint
-        args: ["-c", ".yamllint.yml"]
-
-  # ---------------------------------------------------------
-  # Secretos: rechaza el commit si detecta credenciales expuestas
-  # ---------------------------------------------------------
-  - repo: https://github.com/Yelp/detect-secrets
-    rev: v1.5.0
-    hooks:
-      - id: detect-secrets
-        args: ["--baseline", ".secrets.baseline"]
-        # kubernetes/overlays/.../kustomization.yaml: "images: newTag: <sha>"
-        # es exactamente lo que kubernetes:deploy (.gitlab-ci.yml) comitea en
-        # CADA push a main vía "kustomize edit set image" -- un SHA de Git de
-        # 40 caracteres hex es indistinguible de un secreto de alta entropía
-        # para este scanner. No es un secreto (el tag de imagen es público,
-        # visible en ECR); no tiene sentido re-auditar un falso positivo
-        # nuevo en cada deploy.
-        exclude: >
-          (?x)^(
-            .*\.lock|
-            .*\.dvc|
-            kubernetes/overlays/.*/kustomization\.yaml
-          )$
-
-  # ---------------------------------------------------------
-  # Python: import sorting (isort, profile=black) por subproyecto
-  # ---------------------------------------------------------
-  - repo: https://github.com/PyCQA/isort
-    rev: 5.13.2
-    hooks:
-      - id: isort
-        name: isort (api)
-        files: ^api/
-      - id: isort
-        name: isort (core_ml)
-        files: ^core_ml/
-
-  # ---------------------------------------------------------
-  # Python: formateo (Black) por subproyecto
-  # ---------------------------------------------------------
-  - repo: https://github.com/psf/black
-    rev: 24.8.0
-    hooks:
-      - id: black
-        name: black (api)
-        files: ^api/
-      - id: black
-        name: black (core_ml)
-        files: ^core_ml/
-
-  # ---------------------------------------------------------
-  # Python: linting estático (Ruff)
+  # Python: lint + formateo (Ruff reemplaza black/isort/flake8)
   # ---------------------------------------------------------
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.6.9
     hooks:
       - id: ruff
         args: ["--fix", "--exit-non-zero-on-fix"]
+      - id: ruff-format
 
   # ---------------------------------------------------------
-  # Python: análisis de seguridad estático (Bandit / SAST)
-  # ---------------------------------------------------------
-  - repo: https://github.com/PyCQA/bandit
-    rev: 1.7.9
-    hooks:
-      - id: bandit
-        name: bandit (api)
-        args: ["-c", "api/pyproject.toml"]
-        files: ^api/.*\.py$
-        exclude: ^api/tests/
-        additional_dependencies: ["bandit[toml]"]
-      - id: bandit
-        name: bandit (core_ml)
-        args: ["-c", "core_ml/pyproject.toml"]
-        files: ^core_ml/.*\.py$
-        exclude: ^core_ml/tests/
-        additional_dependencies: ["bandit[toml]"]
-
-  # ---------------------------------------------------------
-  # Python: type checking (mypy) — usa el venv real de Poetry
+  # Python: type checking (mypy), liviano y opcional -- usa el venv real de
+  # Poetry de cada subproyecto.
   # ---------------------------------------------------------
   - repo: local
     hooks:
@@ -139,7 +60,7 @@ repos:
         pass_filenames: false
 
       # -------------------------------------------------------
-      # Python: pruebas (pytest) — usa el venv real de Poetry
+      # Python: pruebas unitarias (pytest)
       # -------------------------------------------------------
       - id: pytest-api
         name: pytest (api)
@@ -155,38 +76,12 @@ repos:
         files: ^core_ml/.*\.py$
         pass_filenames: false
 
-  # ---------------------------------------------------------
-  # Infra: valida sintaxis de Terraform (fmt -check) si se toca IaC
-  # ---------------------------------------------------------
-  - repo: local
-    hooks:
+      # -------------------------------------------------------
+      # Infra: valida sintaxis de Terraform (fmt -check) si se toca IaC
+      # -------------------------------------------------------
       - id: terraform-fmt-check
         name: terraform fmt -check
-        entry: bash -c 'command -v terraform >/dev/null 2>&1 && terraform -chdir=terraform fmt -check -recursive || echo "terraform no instalado localmente, omitiendo (se valida en CI)"'
+        entry: bash -c 'command -v terraform >/dev/null 2>&1 && terraform -chdir=terraform fmt -check -recursive || echo "terraform no instalado localmente, omitiendo"'
         language: system
         files: ^terraform/.*\.tf$
         pass_filenames: false
-
-  # ---------------------------------------------------------
-  # Escaneo de vulnerabilidades de dependencias/IaC (Trivy)
-  # Se ejecuta en pre-push (no en cada commit) por su duración,
-  # y siempre en CI. Requiere Docker Desktop corriendo.
-  # ---------------------------------------------------------
-  - repo: local
-    hooks:
-      - id: trivy-fs-scan
-        name: trivy fs scan (dependencias + IaC + secretos)
-        # MSYS_NO_PATHCONV: en Git Bash para Windows, "/repo" se traduce
-        # automáticamente a una ruta de Windows (ej. "C:/Program Files/Git/repo"),
-        # rompiendo tanto el destino del volumen como --ignorefile. No-op en Linux/Mac.
-        # tfstate: siempre contiene secretos en texto plano (es el diseño de
-        # Terraform) -- ya está en .gitignore y jamás se pushea; escanearlo
-        # aquí solo generaría ruido en cada corrida local tras un apply.
-        # .claude: estado interno del asistente (incluye locks activos, ej.
-        # scheduled_tasks.lock) -- trivy podía colgarse esperando el lock
-        # con "semaphore acquire: context deadline exceeded".
-        # Versión pineada, no ":latest" -- ver Makefile::trivy / .gitlab-ci.yml::security:trivy (mismo pin en los tres).
-        entry: bash -c 'MSYS_NO_PATHCONV=1 docker run --rm -v "$(pwd)":/repo aquasec/trivy:0.74.0 fs --exit-code 1 --severity HIGH,CRITICAL --ignorefile /repo/.trivyignore --skip-dirs "**/.terraform,**/mlruns,**/mlartifacts,**/.claude" --skip-files "**/*.tfstate,**/*.tfstate.*" /repo'
-        language: system
-        pass_filenames: false
-        stages: [pre-push]

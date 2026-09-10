@@ -1,7 +1,7 @@
 # Nombre determinístico (Account ID, no un sufijo aleatorio): un
 # `random_id` obligaría a un paso manual ("copiar el nombre real desde
 # `terraform output` a los manifiestos de K8s") cada vez que se recree el
-# bucket -- exactamente el tipo de mutación frágil que esta fase elimina.
+# bucket -- exactamente el tipo de mutación frágil que este enfoque evita.
 # Con el Account ID, el nombre es conocido de antemano por Terraform *y*
 # por el ConfigMap de Kustomize (kubernetes/base/configmap.yaml) sin
 # necesidad de pasarse valores en runtime.

@@ -1,8 +1,6 @@
 # Security Group para RDS (Zero-Trust con EKS)
 resource "aws_security_group" "rds_sg" {
-  name = "${var.project_name}-rds-sg"
-  # GroupDescription de EC2 solo admite ASCII ("terraform apply" fallaba con
-  # "Character sets beyond ASCII are not supported" por la tilde en "trafico").
+  name        = "${var.project_name}-rds-sg"
   description = "Allow PostgreSQL traffic exclusively from EKS"
   vpc_id      = module.vpc.vpc_id
 
@@ -14,22 +12,15 @@ resource "aws_security_group" "rds_sg" {
   }
 }
 
-# 1. Lectura del secreto en Secrets Manager
-data "aws_secretsmanager_secret" "db_password" {
-  # Asegúrate de que este nombre coincida exactamente con el que creaste en el Paso 1
-  name = "dlinear-mlops/db-password"
-}
-
-data "aws_secretsmanager_secret_version" "db_password" {
-  secret_id = data.aws_secretsmanager_secret.db_password.id
-}
-
-# 2. Inyección del secreto en un local
-locals {
-  db_password = jsondecode(data.aws_secretsmanager_secret_version.db_password.secret_string)["db_password"]
-}
-
-# 3. Instancia RDS para MLflow
+# Instancia única de RDS para el backend store de MLflow -- sin Multi-AZ ni
+# réplicas de lectura, suficiente para un proyecto de aprendizaje (Multi-AZ
+# duplica el costo por una disponibilidad que este proyecto no necesita).
+#
+# La contraseña se pasa por variable de Terraform (var.db_password, sin
+# default -- ver variables.tf), no se lee de AWS Secrets Manager: menos
+# piezas que gestionar. Los pods de Kubernetes nunca leen esta contraseña
+# desde Terraform ni desde AWS -- se crea a mano, una sola vez, como un
+# Secret plano de Kubernetes (ver kubernetes/base/mlflow.yaml).
 resource "aws_db_instance" "mlflow_db" {
   identifier        = "${var.project_name}-backend-db"
   instance_class    = "db.t3.micro"
@@ -43,11 +34,11 @@ resource "aws_db_instance" "mlflow_db" {
   # `--backend-store-uri` sirva en local y en producción.
   db_name                = "mlflow_db"
   username               = var.db_username
-  password               = local.db_password # <-- Usando el secreto extraído dinámicamente
+  password               = var.db_password
   db_subnet_group_name   = module.vpc.database_subnet_group_name
   vpc_security_group_ids = [aws_security_group.rds_sg.id]
-  skip_final_snapshot    = var.environment == "dev" ? true : false
-  multi_az               = var.environment == "prod" ? true : false
+  skip_final_snapshot    = true
+  multi_az               = false
 }
 
 output "rds_endpoint" {

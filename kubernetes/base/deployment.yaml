@@ -14,7 +14,7 @@ spec:
       labels:
         app: dlinear-forecast
     spec:
-      serviceAccountName: dlinear-sa  # Enlace con IRSA
+      serviceAccountName: dlinear-sa
       containers:
       - name: dlinear-container
         # Nombre lógico: el overlay de cada entorno lo remapea al registro/

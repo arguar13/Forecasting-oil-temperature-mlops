@@ -1,15 +1,19 @@
-# Least-privilege: solo lectura del bucket de artefactos de este proyecto
-# (no AmazonS3ReadOnlyAccess a nivel de cuenta) -- salvo el prefijo batch/,
-# donde SÍ necesita escribir: core_ml/src/batch_inference.py (el mismo
-# contenedor de la API, usado como entrypoint del CronJob
-# dlinear-batch-inference) sube su resultado a
-# s3://<bucket>/batch/predictions_output.csv. Sin esto, el CronJob cargaba
-# el modelo y corria la inferencia bien, pero fallaba en el ultimo paso con
-# "AccessDenied: ... s3:PutObject ... because no identity-based policy
-# allows the s3:PutObject action" (verificado en el cluster real disparando
-# el CronJob manualmente). Acotado a ese prefijo -- no al bucket entero --
-# para no poder pisar por error el propio artefacto del modelo (mlflow/) ni
-# el store de DVC (dvc-store/).
+# IAM de este proyecto, organizado en dos roles:
+#
+#   - dlinear_api_s3_read: policy de S3 adjuntada al rol del node group de
+#     EKS (ver eks.tf) -- todos los Pods del cluster heredan el permiso del
+#     nodo donde corren, en vez de un rol de IAM por ServiceAccount (IRSA).
+#   - gitlab_ci_role: el rol que GitLab CI asume vía OIDC (sin credenciales
+#     de larga duración) para hacer build/push de la imagen a ECR, leer/
+#     escribir el bucket de artefactos (S3, incluido el remoto de DVC) y
+#     desplegar en el cluster.
+
+# Least-privilege: solo el bucket de artefactos de este proyecto (no
+# AmazonS3ReadOnlyAccess a nivel de cuenta), salvo el prefijo batch/, donde
+# el CronJob de batch inference (core_ml/src/batch_inference.py) sí necesita
+# escribir su resultado. Acotado a ese prefijo -- no al bucket entero -- para
+# no poder pisar por error el artefacto del modelo (mlflow/) ni el store de
+# DVC (dvc-store/).
 resource "aws_iam_policy" "dlinear_api_s3_read" {
   name = "dlinear-api-s3-read-policy"
 
@@ -35,144 +39,27 @@ resource "aws_iam_policy" "dlinear_api_s3_read" {
   })
 }
 
-# cloudwatch:PutMetricData no admite scoping por Resource (la API de
-# CloudWatch Metrics no tiene ARNs de recurso individuales para métricas
-# custom) -- Resource: "*" es lo unico que la accion soporta, no una
-# politica demasiado amplia por descuido. La Condition de abajo es la
-# forma real de acotarlo: solo puede publicar en el namespace de este
-# batch job, no en cualquier otro.
-resource "aws_iam_policy" "dlinear_batch_cloudwatch" {
-  name = "dlinear-batch-cloudwatch-heartbeat-policy"
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Effect   = "Allow"
-        Action   = ["cloudwatch:PutMetricData"]
-        Resource = "*"
-        Condition = {
-          StringEquals = {
-            "cloudwatch:namespace" = "DLinearBatchInference"
-          }
-        }
-      }
-    ]
-  })
-}
-
-# core_ml/src/monitoring/stream_consumer.py (lectura) y
-# scripts/sensor_simulator.py (escritura) -- ambos corren bajo dlinear-sa,
-# igual que la API y el CronJob de batch, asi que la policy se adjunta al
-# mismo rol IRSA compartido de abajo en vez de crear uno nuevo.
-resource "aws_iam_policy" "dlinear_kinesis_stream" {
-  name = "dlinear-kinesis-sensor-stream-policy"
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Sid    = "ConsumerRead"
-        Effect = "Allow"
-        Action = [
-          "kinesis:GetRecords",
-          "kinesis:GetShardIterator",
-          "kinesis:DescribeStreamSummary",
-          "kinesis:ListShards",
-        ]
-        Resource = aws_kinesis_stream.sensor_telemetry.arn
-      },
-      {
-        # PutRecord: solo lo usa scripts/sensor_simulator.py (el reemplazo
-        # de un sensor real para este dataset historico), pero corre bajo
-        # el mismo Job/ServiceAccount que el batch de inferencia, asi que
-        # comparte esta misma policy en lugar de una tercera.
-        Sid      = "SimulatorWrite"
-        Effect   = "Allow"
-        Action   = ["kinesis:PutRecord", "kinesis:PutRecords"]
-        Resource = aws_kinesis_stream.sensor_telemetry.arn
-      }
-    ]
-  })
-}
-
-# IAM Role para que el Pod de la API pueda leer modelos de S3 (IRSA)
-module "iam_eks_role" {
-  source  = "terraform-aws-modules/iam/aws//modules/iam-role-for-service-accounts-eks"
-  version = "5.30.0"
-
-  role_name = "dlinear-api-s3-read-role"
-
-  # NOTA: `attach_s3_read_only_policy` no existe en esta versión del módulo
-  # (falló en `terraform validate` -- "Unsupported argument"); el mecanismo
-  # correcto en v5.x es `role_policy_arns`, y de paso permite acotar el
-  # permiso al bucket real en vez de S3 completo.
-  role_policy_arns = {
-    s3_read    = aws_iam_policy.dlinear_api_s3_read.arn
-    cloudwatch = aws_iam_policy.dlinear_batch_cloudwatch.arn
-    kinesis    = aws_iam_policy.dlinear_kinesis_stream.arn
-  }
-
-  oidc_providers = {
-    ex = {
-      provider_arn               = module.eks.oidc_provider_arn
-      namespace_service_accounts = ["dlinear-production:dlinear-sa"]
-    }
-  }
-}
-
 # ============================================================
-# OIDC federation con GitLab.com (autenticación sin credenciales
-# de larga duración -- ver .gitlab-ci.yml::.aws-auth)
+# OIDC federation con GitLab.com -- permite que GitLab CI asuma un rol de
+# AWS con credenciales temporales (sts:AssumeRoleWithWebIdentity), sin
+# guardar un access key de larga duración como variable de CI.
 # ============================================================
 data "tls_certificate" "gitlab" {
   url = "https://gitlab.com"
 }
 
 resource "aws_iam_openid_connect_provider" "gitlab" {
-  url = "https://gitlab.com"
-  # "sts.amazonaws.com", no "https://gitlab.com": el proveedor OIDC de
-  # gitlab.com es un recurso único por cuenta de AWS -- ya existe en esta
-  # cuenta, gestionado por otro proyecto (predictive-maintenance-mlops) con
-  # esta audiencia (la que AWS documenta como estándar para federación STS).
-  # Declararlo igual evita pelear por el recurso compartido en cada apply;
-  # .gitlab-ci.yml (id_tokens.aud) usa la misma audiencia.
+  url             = "https://gitlab.com"
   client_id_list  = ["sts.amazonaws.com"]
   thumbprint_list = [data.tls_certificate.gitlab.certificates[0].sha1_fingerprint]
-
-  # Recurso compartido con otro proyecto (predictive-maintenance-mlops,
-  # ver nota arriba) -- importado a este state (terraform import), no creado
-  # por este apply. prevent_destroy evita que un futuro "terraform destroy"
-  # de ESTE proyecto (Fase W) se lleve por delante el OIDC provider que el
-  # otro proyecto sigue necesitando.
-  #
-  # ignore_changes = [tags, tags_all]: este resource no declara "tags" (a
-  # propósito, ver arriba), pero el recurso real trae los tags que le puso
-  # el otro proyecto -- sin esto, cada apply intenta "destaguearlo" para
-  # igualarlo a nuestro estado deseado (sin tags), y TerraformCI_OIDC_Role
-  # (con permisos acotados a propósito, ver terraform_ci_iam_scoped más
-  # abajo) no tiene -- ni debería tener -- iam:UntagOpenIDConnectProvider
-  # sobre un recurso que no es completamente nuestro. Dejar la gestión de
-  # tags enteramente al proyecto que sí es dueño del recurso.
-  lifecycle {
-    prevent_destroy = true
-    ignore_changes  = [tags, tags_all]
-  }
 }
 
-# ============================================================
-# Rol para GitLab CI/CD (GitLabCI_OIDC_Role -- el nombre debe
-# coincidir exactamente con el `role-arn` que .gitlab-ci.yml asume vía
-# `sts assume-role-with-web-identity`)
-# ============================================================
+# Nombre exacto que .gitlab-ci.yml espera en `sts assume-role-with-web-identity`.
 resource "aws_iam_role" "gitlab_ci_role" {
   name = "GitLabCI_OIDC_Role"
 
-  # Trust policy federada por OIDC (no un principal de servicio EC2, que
-  # nunca podría satisfacer un `assume-role-with-web-identity` desde
-  # GitLab). `sub` se restringe al proyecto y rama exactos que de verdad
-  # despliegan -- cualquier otro proyecto/rama de GitLab.com no puede
-  # asumir este rol aunque conozca el ARN.
+  # `sub` se restringe al proyecto y rama exactos que despliegan -- ningún
+  # otro proyecto/rama de GitLab.com puede asumir este rol.
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
@@ -195,11 +82,6 @@ resource "aws_iam_role" "gitlab_ci_role" {
   })
 }
 
-# Least-privilege: ECR limitado a los repositorios de esta app (no
-# AmazonEC2ContainerRegistryReadOnly a nivel de cuenta, y sí con permiso de
-# push, que docker:build-push y docker:build-push-mlflow necesitan). Incluye
-# tanto el repo de la API como el del MLflow Tracking Server
-# (kubernetes/base/mlflow.yaml), publicado por el mismo pipeline.
 resource "aws_iam_role_policy" "gitlab_ci_ecr" {
   name = "ecr-push-pull-dlinear-repo"
   role = aws_iam_role.gitlab_ci_role.id
@@ -223,19 +105,15 @@ resource "aws_iam_role_policy" "gitlab_ci_ecr" {
           "ecr:UploadLayerPart",
           "ecr:CompleteLayerUpload",
         ]
-        Resource = [
-          aws_ecr_repository.dlinear_api.arn,
-          aws_ecr_repository.dlinear_mlflow.arn,
-        ]
+        Resource = aws_ecr_repository.dlinear_api.arn
       }
     ]
   })
 }
 
-# Least-privilege: S3 limitado al bucket de artefactos/datos de este
-# proyecto (no AmazonS3FullAccess a nivel de cuenta). Cubre tanto los
-# artefactos de modelo/MLflow como el remoto de DVC (mismo bucket,
-# prefijo `dvc-store/`, ver .dvc/config).
+# Least-privilege: S3 limitado al bucket de este proyecto (no
+# AmazonS3FullAccess). Cubre tanto los artefactos de modelo/MLflow como el
+# remoto de DVC (mismo bucket, prefijo dvc-store/, ver .dvc/config).
 resource "aws_iam_role_policy" "gitlab_ci_s3" {
   name = "s3-rw-model-artifacts-bucket"
   role = aws_iam_role.gitlab_ci_role.id
@@ -261,198 +139,22 @@ resource "aws_iam_role_policy" "gitlab_ci_s3" {
   })
 }
 
-# NOTA: bajo GitOps (ArgoCD reconcilia el cluster desde Git), este rol ya
-# NO necesita permisos de EKS/kubectl -- CI solo publica la imagen (ECR) y
-# actualiza el tag declarado en kubernetes/overlays/production/ (Git). Ver
-# .gitlab-ci.yml::kubernetes:deploy y kubernetes/README.md.
-
-# ============================================================
-# Rol separado para `terraform plan/apply` (TerraformCI_OIDC_Role).
-#
-# Provisionar VPC/EKS/RDS/IAM/S3/ECR requiere permisos amplios sobre esos
-# servicios -- incluyendo IAM, porque este mismo código gestiona roles y
-# políticas (este archivo). Separarlo del rol de la app (arriba, limitado a
-# ECR+S3) evita que un pipeline de build/train comprometido pueda escalar a
-# permisos de administración de infraestructura.
-# ============================================================
-resource "aws_iam_role" "terraform_ci_role" {
-  name = "TerraformCI_OIDC_Role"
-
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Effect = "Allow"
-        Principal = {
-          Federated = aws_iam_openid_connect_provider.gitlab.arn
-        }
-        Action = "sts:AssumeRoleWithWebIdentity"
-        Condition = {
-          StringEquals = {
-            "gitlab.com:aud" = "sts.amazonaws.com"
-          }
-          StringLike = {
-            "gitlab.com:sub" = "project_path:${var.gitlab_project_path}:ref_type:branch:ref:main"
-          }
-        }
-      }
-    ]
-  })
-}
-
-# PowerUserAccess cubre EC2/VPC/EKS/RDS/S3/ECR sin otorgar administración
-# total de IAM; el complemento de abajo agrega únicamente los permisos de
-# IAM que este código SÍ necesita (crear/gestionar los roles y el OIDC
-# provider de este mismo repo), acotados por prefijo de nombre.
-resource "aws_iam_role_policy_attachment" "terraform_ci_power_user" {
-  role       = aws_iam_role.terraform_ci_role.name
-  policy_arn = "arn:aws:iam::aws:policy/PowerUserAccess"
-}
-
-# PowerUserAccess deniega explícitamente TODO iam:* (lectura incluida) --
-# el refresh de `terraform plan` necesita leer CUALQUIER recurso IAM ya
-# trackeado en el state (roles, OIDC providers, policies) sin importar su
-# nombre, no solo los de prefijo "dlinear-*"/"${var.project_name}-*" de
-# abajo. Iterar acción-por-acción (GetRole, luego GetOpenIDConnectProvider,
-# luego...) cada vez que el plan pisaba un tipo de recurso nuevo era lento
-# y gastaba minutos de CI -- de solo lectura, sin riesgo de escalar
-# privilegios, así que se usa la managed policy estándar de AWS en vez de
-# reinventarla acción por acción.
-resource "aws_iam_role_policy_attachment" "terraform_ci_iam_read_only" {
-  role       = aws_iam_role.terraform_ci_role.name
-  policy_arn = "arn:aws:iam::aws:policy/IAMReadOnlyAccess"
-}
-
-resource "aws_iam_role_policy" "terraform_ci_iam_scoped" {
-  name = "iam-manage-dlinear-roles-only"
-  role = aws_iam_role.terraform_ci_role.id
+# El job de deploy (.gitlab-ci.yml::deploy) necesita poder describir el
+# cluster para generar el kubeconfig (`aws eks update-kubeconfig`). El
+# permiso para de verdad operar sobre los recursos de Kubernetes (RBAC) se
+# concede aparte, mapeando este rol en el ConfigMap aws-auth del cluster --
+# un paso manual, una sola vez por cluster (ver README.md, sección Desplegar).
+resource "aws_iam_role_policy" "gitlab_ci_eks_describe" {
+  name = "eks-describe-cluster"
+  role = aws_iam_role.gitlab_ci_role.id
 
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
       {
-        Effect = "Allow"
-        Action = [
-          "iam:CreateRole",
-          "iam:DeleteRole",
-          "iam:GetRole",
-          "iam:UpdateRole",
-          "iam:PutRolePolicy",
-          "iam:DeleteRolePolicy",
-          "iam:GetRolePolicy",
-          "iam:AttachRolePolicy",
-          "iam:DetachRolePolicy",
-          "iam:ListRolePolicies",
-          "iam:ListAttachedRolePolicies",
-          "iam:TagRole",
-          "iam:PassRole",
-        ]
-        Resource = [
-          "arn:aws:iam::*:role/dlinear-*",
-          "arn:aws:iam::*:role/${var.project_name}-*",
-          aws_iam_role.gitlab_ci_role.arn,
-          aws_iam_role.terraform_ci_role.arn,
-        ]
-      },
-      {
-        Effect = "Allow"
-        Action = [
-          "iam:CreatePolicy",
-          "iam:DeletePolicy",
-          "iam:GetPolicy",
-          "iam:GetPolicyVersion",
-          "iam:ListPolicyVersions",
-          "iam:CreatePolicyVersion",
-          "iam:DeletePolicyVersion",
-          "iam:TagPolicy",
-        ]
-        Resource = [
-          "arn:aws:iam::*:policy/dlinear-*",
-        ]
-      },
-      {
-        Effect = "Allow"
-        Action = [
-          "iam:CreateOpenIDConnectProvider",
-          "iam:GetOpenIDConnectProvider",
-          "iam:DeleteOpenIDConnectProvider",
-          "iam:TagOpenIDConnectProvider",
-        ]
-        Resource = "arn:aws:iam::*:oidc-provider/gitlab.com"
-      },
-      {
-        # Solo lectura, sin restricción de nombre: el módulo EKS crea roles
-        # auxiliares (rol del cluster, rol del node group) con nombres que
-        # el propio módulo genera -- no siguen el prefijo "dlinear-*" (ej.
-        # "inference-eks-node-group-...") -- así que el refresh de
-        # `terraform plan` (lee CUALQUIER recurso ya trackeado en el state)
-        # fallaba con AccessDenied aunque nunca necesite CREAR nada fuera
-        # de esos prefijos. Los permisos de escritura de arriba sí siguen
-        # acotados por prefijo -- esto no habilita escalar privilegios.
-        Effect = "Allow"
-        Action = [
-          "iam:GetRole",
-          "iam:GetRolePolicy",
-          "iam:ListRolePolicies",
-          "iam:ListAttachedRolePolicies",
-          "iam:ListInstanceProfilesForRole",
-        ]
-        Resource = "*"
-      },
-      {
-        # PassRole (distinto de administrar el role en sí, ver el statement
-        # de arriba) -- EKS lo exige al crear/reemplazar el node group, para
-        # poder asignarle este rol a las instancias EC2 que lanza. Mismo
-        # motivo que el statement de solo lectura de arriba: el rol lo
-        # genera el módulo EKS con el prefijo de la clave del node group
-        # ("inference-eks-node-group-...", ver eks.tf), no "dlinear-*".
-        # Nunca se había ejercitado en CI porque el primer apply de este
-        # node group se hizo con credenciales administrativas (Fase N) --
-        # verificado en un apply real: "AccessDeniedException ... not
-        # authorized to perform: iam:PassRole on resource:
-        # .../inference-eks-node-group-...".
-        Effect = "Allow"
-        Action = [
-          "iam:PassRole",
-        ]
-        Resource = "arn:aws:iam::*:role/inference-eks-node-group-*"
-      }
-    ]
-  })
-}
-
-# El módulo EKS crea y administra su propia KMS key (cifrado de secrets de
-# Kubernetes) -- la key policy que genera no incluye a este rol, y
-# PowerUserAccess por sí solo no basta para KMS cuando la key policy no
-# delega en IAM. Acotado a la key de este cluster (tag Environment=production
-# puesto por module.eks.module.kms), no a todas las keys de la cuenta.
-resource "aws_iam_role_policy" "terraform_ci_kms" {
-  name = "kms-manage-eks-cluster-key"
-  role = aws_iam_role.terraform_ci_role.id
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Effect = "Allow"
-        Action = [
-          "kms:DescribeKey",
-          "kms:GetKeyPolicy",
-          "kms:GetKeyRotationStatus",
-          "kms:ListResourceTags",
-          "kms:CreateKey",
-          "kms:CreateAlias",
-          "kms:DeleteAlias",
-          "kms:UpdateAlias",
-          "kms:EnableKeyRotation",
-          "kms:DisableKeyRotation",
-          "kms:PutKeyPolicy",
-          "kms:TagResource",
-          "kms:UntagResource",
-          "kms:ScheduleKeyDeletion",
-          "kms:CancelKeyDeletion",
-        ]
-        Resource = "*"
+        Effect   = "Allow"
+        Action   = ["eks:DescribeCluster"]
+        Resource = module.eks.cluster_arn
       }
     ]
   })

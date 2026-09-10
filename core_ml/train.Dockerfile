@@ -1,4 +1,4 @@
-# Entrenamiento local (Fase E) -- ver docker-compose.yml::trainer.
+# Entrenamiento local -- ver docker-compose.yml::trainer.
 #
 # mlflow.pyfunc.log_model() persiste la ruta relativa de cada artefacto
 # ("model_state_dict", "scaler_X", ...) usando el separador nativo del SO

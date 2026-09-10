@@ -9,14 +9,14 @@ from sklearn.preprocessing import StandardScaler
 
 from src.data_contracts import ETT_CONTRACT, TOY_ETT_CONTRACT, ETTDatasetContract, validate_ett_csv
 from src.logging_config import configure_logging, get_logger
-from src.monitoring.reference_profile import build_feature_baselines
+from src.monitoring.drift_check import build_feature_baselines
 
 configure_logging()
 logger = get_logger(__name__)
 
 # Datasets versionados por DVC (ver core_ml/data/*.dvc). `dvc pull` los
-# materializa localmente; ya no se descargan en tiempo de ejecución, para que
-# cada corrida sea reproducible a partir de un hash de datos conocido.
+# materializa localmente antes de correr, para que cada corrida sea
+# reproducible a partir de un hash de datos conocido.
 TOY_DATA_PATH = "data/toy/ETTh1_toy.csv"
 RAW_DATA_PATH = "data/raw/ETTh1.csv"
 
@@ -89,14 +89,13 @@ class DataProcessor:
         val_data = data.iloc[train_size : train_size + val_size]
         test_data = data.iloc[train_size + val_size :]
 
-        # Baseline de drift (core_ml/src/monitoring/): media/std por sensor
-        # del split de train, ANTES de escalar -- CusumDetector necesita la
-        # escala fisica real (grados C, MW) para comparar contra lecturas
-        # crudas entrantes de scripts/sensor_simulator.py, no la escala
-        # normalizada (media~0, std~1) que produce StandardScaler mas abajo.
-        # Solo las estadisticas de features; train.py completa
-        # baseline_test_mse/mae despues de evaluar el holdout, algo que este
-        # metodo no puede hacer (aqui todavia no existe ningun modelo).
+        # Perfil de referencia para el chequeo de drift (core_ml/src/monitoring/
+        # drift_check.py): media/std por sensor del split de train, ANTES de
+        # escalar -- para comparar contra lecturas crudas (grados C, MW) del
+        # batch de inferencia, no la escala normalizada que produce
+        # StandardScaler mas abajo. Solo las estadisticas de features; train.py
+        # completa baseline_test_mse/mae despues de evaluar el holdout, algo
+        # que este metodo no puede hacer (aqui todavia no existe ningun modelo).
         feature_baselines = build_feature_baselines(train_data)
         feature_baselines.write(os.path.join(self.output_dir, "reference_profile.json"))
 

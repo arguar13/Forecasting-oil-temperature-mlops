@@ -1,0 +1,186 @@
+"""Simple data drift check for batch inference.
+
+It loads the reference profile logged with the model (mean/std per sensor,
+computed once from the training data), compares a new batch of readings
+against it with a per-feature z-score, and logs the result.
+
+It intentionally does NOT retrain, alert an external system, or store any
+state between runs -- it only answers "does this batch still look like
+the data the model was trained on?" and reports the answer. Deciding what
+to do about a drift report (investigate, retrain, ignore) is left to a
+human. For a project at this scale, that is enough: no message queue, no
+extra database table, no cooldown/ceiling bookkeeping to maintain.
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import pandas as pd
+
+from src.logging_config import get_logger
+
+logger = get_logger(__name__)
+
+SENSOR_COLUMNS = ("HUFL", "HULL", "MUFL", "MULL", "LUFL", "LULL", "OT")
+
+# A feature's batch mean more than this many standard deviations away from
+# its training-time mean counts as drift. 3.0 is the common "very unlikely
+# under the reference distribution" rule of thumb.
+Z_SCORE_ALERT_THRESHOLD = 3.0
+
+
+@dataclass
+class FeatureBaseline:
+    mean: float
+    std: float
+
+
+@dataclass
+class ReferenceProfile:
+    """The statistical baseline logged alongside the model.
+
+    Built in two steps because they happen in two different pipeline
+    stages: data_processing.py computes per-sensor mean/std from the raw
+    training split (`build_feature_baselines`) before any model exists;
+    train.py later fills in the held-out test MSE/MAE once it has
+    evaluated one, and logs the completed profile as an MLflow artifact of
+    that run.
+    """
+
+    created_at: str
+    n_rows: int
+    features: dict[str, FeatureBaseline] = field(default_factory=dict)
+    baseline_test_mse: float | None = None
+    baseline_test_mae: float | None = None
+
+    def to_json(self) -> str:
+        return json.dumps(asdict(self), indent=2, sort_keys=True)
+
+    def write(self, path: str | Path) -> Path:
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(self.to_json(), encoding="utf-8")
+        return target
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> ReferenceProfile:
+        return cls(
+            created_at=payload["created_at"],
+            n_rows=int(payload["n_rows"]),
+            features={k: FeatureBaseline(**v) for k, v in payload.get("features", {}).items()},
+            baseline_test_mse=payload.get("baseline_test_mse"),
+            baseline_test_mae=payload.get("baseline_test_mae"),
+        )
+
+    @classmethod
+    def read(cls, path: str | Path) -> ReferenceProfile:
+        return cls.from_dict(json.loads(Path(path).read_text(encoding="utf-8")))
+
+
+def build_feature_baselines(raw_train_df: pd.DataFrame) -> ReferenceProfile:
+    """Mean/std per sensor from the raw (pre-scaling) training split.
+
+    Called from data_processing.py, which has the raw training dataframe
+    but has not trained anything yet -- the performance fields are left
+    None here and filled in later by train.py.
+    """
+    features: dict[str, FeatureBaseline] = {}
+    for column in SENSOR_COLUMNS:
+        values = raw_train_df[column].dropna().to_numpy(dtype=float)
+        std = float(np.std(values))
+        # Floored, not left at zero: a constant column would otherwise make
+        # every future reading's z-score infinite.
+        features[column] = FeatureBaseline(mean=float(np.mean(values)), std=max(std, 1e-6))
+
+    return ReferenceProfile(
+        created_at=datetime.now(UTC).isoformat(),
+        n_rows=int(len(raw_train_df)),
+        features=features,
+    )
+
+
+@dataclass
+class FeatureDriftResult:
+    feature: str
+    batch_mean: float
+    reference_mean: float
+    z_score: float
+    drifted: bool
+
+
+@dataclass
+class DriftReport:
+    status: str  # "ok" | "drift"
+    checked_at: str
+    n_rows: int
+    drifted_features: list[str] = field(default_factory=list)
+    per_feature: dict[str, FeatureDriftResult] = field(default_factory=dict)
+
+
+def check_batch_for_drift(
+    batch_df: pd.DataFrame,
+    reference: ReferenceProfile,
+    threshold: float = Z_SCORE_ALERT_THRESHOLD,
+) -> DriftReport:
+    """Compares one batch's per-feature mean against the reference profile.
+
+    For each tracked sensor column, this standardizes the batch's mean
+    against the reference mean/std (a z-score): a feature "drifts" when
+    its batch mean sits more than `threshold` standard deviations away
+    from the value the model was trained on. One number per feature, no
+    state carried between batches, no action taken automatically.
+    """
+    per_feature: dict[str, FeatureDriftResult] = {}
+    drifted: list[str] = []
+
+    for name, baseline in reference.features.items():
+        if name not in batch_df.columns:
+            continue
+        batch_mean = float(batch_df[name].dropna().mean())
+        z_score = (batch_mean - baseline.mean) / baseline.std
+        is_drifted = abs(z_score) > threshold
+        per_feature[name] = FeatureDriftResult(
+            feature=name,
+            batch_mean=batch_mean,
+            reference_mean=baseline.mean,
+            z_score=z_score,
+            drifted=is_drifted,
+        )
+        if is_drifted:
+            drifted.append(name)
+
+    return DriftReport(
+        status="drift" if drifted else "ok",
+        checked_at=datetime.now(UTC).isoformat(),
+        n_rows=len(batch_df),
+        drifted_features=drifted,
+        per_feature=per_feature,
+    )
+
+
+def log_drift_report(report: DriftReport) -> None:
+    """Logs the report. No auto-mitigation, no retraining -- visibility only."""
+    if report.status == "drift":
+        logger.warning(
+            "drift_check_alert",
+            drifted_features=report.drifted_features,
+            checked_at=report.checked_at,
+            n_rows=report.n_rows,
+        )
+        for name in report.drifted_features:
+            result = report.per_feature[name]
+            logger.warning(
+                "drift_check_feature",
+                feature=result.feature,
+                batch_mean=result.batch_mean,
+                reference_mean=result.reference_mean,
+                z_score=result.z_score,
+            )
+    else:
+        logger.info("drift_check_ok", checked_at=report.checked_at, n_rows=report.n_rows)

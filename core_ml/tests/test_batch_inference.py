@@ -6,6 +6,7 @@ import pytest
 
 from src.batch_inference import BatchInferenceService
 from src.data_contracts import FEATURE_COLUMNS, DataContractError
+from src.monitoring.drift_check import FeatureBaseline, ReferenceProfile
 
 
 class _FakeBody:
@@ -49,19 +50,27 @@ def _valid_batch_df(n_rows: int) -> pd.DataFrame:
     return pd.DataFrame([row] * n_rows, columns=list(FEATURE_COLUMNS))
 
 
-@pytest.fixture()
-def service(monkeypatch):
-    # Los tests unitarios nunca deben tocar red: publish_batch_inference_completed
-    # intenta conectarse a un broker Kafka real (best-effort, no bloqueante en
-    # producción, pero sin mockear haría esperar ~5s de timeout por test aquí).
-    monkeypatch.setattr("src.batch_inference.publish_batch_inference_completed", lambda **_: True)
+def _reference_profile_matching(row: dict) -> ReferenceProfile:
+    """Un perfil de referencia centrado exactamente en los valores de `row`,
+    para que el chequeo de drift del batch de prueba nunca alerte por
+    accidente."""
+    return ReferenceProfile(
+        created_at="2024-01-01T00:00:00+00:00",
+        n_rows=1000,
+        features={
+            col: FeatureBaseline(mean=row[col], std=1.0)
+            for col in ("HUFL", "HULL", "MUFL", "MULL", "LUFL", "LULL", "OT")
+        },
+    )
 
+
+@pytest.fixture()
+def service():
     svc = BatchInferenceService()
     svc.model = _FakePyfuncModel()
-    # Mismo motivo que el monkeypatch de arriba, pero para el heartbeat de
-    # CloudWatch (_publish_heartbeat): un cliente boto3 real sin credenciales
-    # válidas contra un endpoint real haría esperar el timeout de red.
-    monkeypatch.setattr(svc.cloudwatch_client, "put_metric_data", lambda **_: {})
+    svc.reference_profile = _reference_profile_matching(
+        {"HUFL": 5.8, "HULL": 2.0, "MUFL": 1.6, "MULL": 0.5, "LUFL": 4.2, "LULL": 1.3, "OT": 30.5}
+    )
     return svc
 
 
@@ -124,7 +133,7 @@ def test_process_batch_scores_and_uploads_predictions(monkeypatch, service):
     assert (result_df["Prediction"] == 42.5).all()
 
 
-def test_process_batch_publishes_a_heartbeat_on_success(monkeypatch, service):
+def test_process_batch_logs_an_ok_drift_report_when_batch_matches_reference(monkeypatch, service):
     n_rows = service.seq_len + 5
     df = _valid_batch_df(n_rows)
     payload = df.to_csv(index=False).encode()
@@ -134,44 +143,45 @@ def test_process_batch_publishes_a_heartbeat_on_success(monkeypatch, service):
     )
     monkeypatch.setattr(service.s3_client, "put_object", lambda **_: None)
 
-    heartbeats = []
+    reports = []
     monkeypatch.setattr(
-        service.cloudwatch_client,
-        "put_metric_data",
-        lambda **kwargs: heartbeats.append(kwargs),
+        "src.batch_inference.log_drift_report", lambda report: reports.append(report)
     )
 
     service.process_batch()
 
-    assert len(heartbeats) == 1
-    call = heartbeats[0]
-    assert call["Namespace"] == "DLinearBatchInference"
-    assert call["MetricData"][0]["MetricName"] == "InferenceSuccess"
-    assert call["MetricData"][0]["Value"] == 1.0
+    assert len(reports) == 1
+    assert reports[0].status == "ok"
 
 
-def test_process_batch_does_not_publish_a_heartbeat_when_scoring_fails(monkeypatch, service):
-    short_df = _valid_batch_df(service.seq_len - 1)
-    payload = short_df.to_csv(index=False).encode()
+def test_process_batch_logs_a_drift_report_when_batch_diverges_from_reference(monkeypatch, service):
+    n_rows = service.seq_len + 5
+    df = _valid_batch_df(n_rows)
+    # Dentro del rango válido del contrato de datos ([-15, 60]) pero lejos
+    # del OT=30.5 del perfil de referencia -- debe alertar drift, no violar
+    # el contrato.
+    df["OT"] = 55.0
+    payload = df.to_csv(index=False).encode()
+
     monkeypatch.setattr(
         service.s3_client, "get_object", lambda Bucket, Key: {"Body": _FakeBody(payload)}
     )
+    monkeypatch.setattr(service.s3_client, "put_object", lambda **_: None)
 
-    heartbeats = []
+    reports = []
     monkeypatch.setattr(
-        service.cloudwatch_client,
-        "put_metric_data",
-        lambda **kwargs: heartbeats.append(kwargs),
+        "src.batch_inference.log_drift_report", lambda report: reports.append(report)
     )
 
-    with pytest.raises(DataContractError):
-        service.process_batch()
+    service.process_batch()
 
-    # Ni un batch que nunca llega a subir nada debe fingir un heartbeat de éxito.
-    assert heartbeats == []
+    assert len(reports) == 1
+    assert reports[0].status == "drift"
+    assert "OT" in reports[0].drifted_features
 
 
-def test_heartbeat_failure_does_not_fail_an_otherwise_successful_batch(monkeypatch, service):
+def test_process_batch_skips_drift_check_when_no_reference_profile_loaded(monkeypatch, service):
+    service.reference_profile = None
     n_rows = service.seq_len + 5
     df = _valid_batch_df(n_rows)
     payload = df.to_csv(index=False).encode()
@@ -181,14 +191,14 @@ def test_heartbeat_failure_does_not_fail_an_otherwise_successful_batch(monkeypat
     )
     monkeypatch.setattr(service.s3_client, "put_object", lambda **_: None)
 
-    def _boom(**_):
-        raise ConnectionError("CloudWatch inalcanzable")
+    reports = []
+    monkeypatch.setattr(
+        "src.batch_inference.log_drift_report", lambda report: reports.append(report)
+    )
 
-    monkeypatch.setattr(service.cloudwatch_client, "put_metric_data", _boom)
-
-    # No debe lanzar: el heartbeat es best-effort, igual que
-    # publish_batch_inference_completed.
     service.process_batch()
+
+    assert reports == []
 
 
 def test_process_batch_names_columns_per_horizon_step_for_multi_step_model(monkeypatch, service):

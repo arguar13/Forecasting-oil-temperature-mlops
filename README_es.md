@@ -1,9 +1,8 @@
-# Predicción de la Temperatura de Aceite de un Transformador: Plataforma MLOps End-to-End en AWS EKS
+# Pronóstico de Temperatura de Aceite de Transformador — Proyecto MLOps
 
-*Read this in other languages: [English](README.md)*
+*Leer en otros idiomas: [English](README.md)*
 
 [![Python](https://img.shields.io/badge/python-3.10-blue?logo=python&logoColor=white)](https://www.python.org/)
-[![Code style: Black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
 [![Linting: Ruff](https://img.shields.io/badge/linting-ruff-red.svg)](https://github.com/astral-sh/ruff)
 [![CI/CD: GitLab](https://img.shields.io/badge/CI%2FCD-GitLab-fc6d26?logo=gitlab&logoColor=white)](https://about.gitlab.com/)
 [![Dependency management: Poetry](https://img.shields.io/badge/dependencies-poetry-60A5FA?logo=poetry&logoColor=white)](https://python-poetry.org/)
@@ -14,476 +13,339 @@
 [![Tracking: MLflow](https://img.shields.io/badge/tracking-mlflow-0194E2?logo=mlflow&logoColor=white)](https://mlflow.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](LICENSE)
 
-## Tabla de Contenidos
+## Qué es este proyecto
 
-- [Resumen Ejecutivo](#resumen-ejecutivo)
-- [Arquitectura del Sistema](#arquitectura-del-sistema)
-- [Stack Tecnológico](#stack-tecnológico)
-- [El Pipeline de MLOps](#el-pipeline-de-mlops)
-- [Modelo de Seguridad](#modelo-de-seguridad)
-- [Monitoreo y Observabilidad](#monitoreo-y-observabilidad)
-- [Primeros Pasos](#primeros-pasos)
-- [Calidad de Código y Validación Shift-Left](#calidad-de-código-y-validación-shift-left)
-- [Estructura del Repositorio](#estructura-del-repositorio)
-- [Decisiones Arquitectónicas y Trade-offs](#decisiones-arquitectónicas-y-trade-offs)
-- [Roadmap](#roadmap)
-- [Licencia](#licencia)
+Una plataforma MLOps de punta a punta que entrena y sirve un modelo
+**DLinear** para predecir la temperatura del aceite de un transformador
+eléctrico **48 horas hacia adelante**, a partir de sus propias lecturas de
+carga y sensores. El dataset es
+[ETTh1](https://github.com/zhouhaoyi/ETDataset) (Electricity Transformer
+Temperature), un benchmark público muy utilizado para pronóstico de series
+temporales a horizontes largos.
 
----
+La temperatura del aceite es un indicador temprano de la salud de un
+transformador: sigue la carga eléctrica y las condiciones ambientales, y
+una desviación sostenida respecto del comportamiento esperado es una señal
+temprana de sobrecarga o degradación. Un modelo que la pronostica con dos
+días de anticipación le da a un operador una ventana para actuar antes de
+cruzar un umbral crítico, en vez de reaccionar después del hecho.
 
-## Resumen Ejecutivo
+**Por qué DLinear.** El paper
+["Are Transformers Effective for Time Series Forecasting?"](https://arxiv.org/abs/2205.13504)
+mostró que una sola capa lineal por canal de salida iguala o supera a
+arquitecturas bastante más elaboradas en benchmarks exactamente de este
+tipo (ETT incluido). Un modelo que entrena en segundos en una laptop
+mantiene el foco en los problemas que cualquier sistema de forecasting
+tiene que resolver sin importar el modelo elegido: entrenamiento
+reproducible, tracking de experimentos, un gate de promoción antes de que
+un modelo llegue a producción, una API que lo sirve, scoring por lotes, y
+un camino de despliegue a Kubernetes.
 
-### El Problema
-
-Las arquitecturas de deep learning para predicción de series temporales, como DLinear, logran una precisión sólida en benchmarks como ETT (Electricity Transformer Temperature) — predecir la temperatura del aceite de un transformador a partir de su propia carga y lecturas de sensores ambientales es un problema industrial de alto valor y ampliamente estudiado. Sin embargo, existe una brecha crítica entre un modelo que funciona bien en un notebook y un modelo que corre de forma confiable en producción: dependencias no deterministas ("en mi máquina funciona"), aprovisionamiento de infraestructura manual y no documentado, versiones de modelo imposibles de trazar, y ninguna salvaguarda que impida que un modelo peor reemplace silenciosamente a uno mejor en producción.
-
-Además, servir predicciones de series temporales típicamente requiere soportar tanto peticiones en tiempo real de baja latencia como scoring masivo por lotes (batch) offline, y hacer ambas cosas de forma ingenua implica duplicar infraestructura o aceptar un compromiso ineficiente.
-
-### La Solución
-
-Este repositorio implementa una plataforma MLOps de nivel producción, de extremo a extremo, que entrena, valida, registra y sirve un modelo de predicción multivariada DLinear en Amazon Web Services, construida estrictamente bajo el principio "local-first": cada capacidad se comprueba primero en una laptop con contenedores desechables, antes de apuntar jamás a una cuenta real de AWS.
-
-La plataforma está diseñada desde el primer día bajo principios de Site Reliability Engineering: 100% de la infraestructura como código, topología de red de confianza cero (zero-trust), gestión determinista de dependencias, un sistema de inferencia híbrido (API online + scoring por lotes) que comparte una única imagen de contenedor, y un clúster de Amazon EKS gestionado con GitOps, donde el estado deseado del clúster vive en Git y no en el historial de shell de nadie.
-
-### El Impacto
-
-- **Ningún modelo imposible de trazar llega jamás a producción.** Cada corrida de entrenamiento queda atada a una tupla inmutable — hash del commit de Git, hash de datos de DVC, hiperparámetros, ID de la corrida de MLflow y tag de la imagen del contenedor — de modo que cualquier predicción servida en producción puede rastrearse hasta el código, los datos y la configuración exactos que la produjeron.
-- **Una regresión nunca puede llegar a producción de forma automática.** El quality gate respaldado por MLflow compara cada modelo recién entrenado contra el que sirve tráfico actualmente y bloquea la promoción — y por lo tanto bloquea `build-push`/`deploy` — a menos que el nuevo modelo sea al menos igual de bueno.
-- **Iteración end-to-end completa en segundos, no en horas.** Un dataset "toy" fijo de ~1.000 filas, versionado con DVC, ejercita todo el pipeline — contratos de datos, preprocesamiento, búsqueda de hiperparámetros, entrenamiento, registro en MLflow — en una laptop, sin GPU y sin costo de nube, antes de tocar jamás el dataset completo.
-- **Cero configuración manual para un nuevo colaborador.** Un DevContainer más una réplica completa de la nube en `docker-compose.yml` (PostgreSQL, LocalStack, Kafka, MLflow, la API) hacen que un nuevo ingeniero corra `make up` y sea productivo de inmediato — sin instalar Python localmente, sin credenciales de AWS, sin estado compartido de "en mi máquina funciona".
-- **Nada llega a AWS que no haya pasado antes por una validación local más barata y rápida, y ningún job de CI/CD consume minutos compartidos de GitLab.com.** Los git hooks de pre-commit, las pruebas de integración locales basadas en Testcontainers, un emulador local del pipeline (`gitlab-ci-local`) y dos runners self-hosted (uno en el propio hardware del desarrollador, tag `local-hardware`; otro dentro del cluster EKS, tag `in-vpc`) detectan fallos y ejecutan el pipeline real sin tocar un solo recurso de cómputo compartido de GitLab.
-- **Un pronóstico real de 48 horas, no una simple consulta de un paso.** El modelo predice las próximas 48 lecturas horarias de temperatura del aceite a partir de las últimas 48 -- uno de los horizontes estándar del paper de DLinear para este mismo dataset -- en vez de predecir un solo paso adelante, que en esta serie es casi indistinguible de un baseline ingenuo ("la próxima lectura es igual a la última") y demostraría poco sobre la capacidad real de pronóstico del modelo.
-
----
-
-## Arquitectura del Sistema
-
-El sistema abarca tres ámbitos operativos: desarrollo local (una emulación completa de la nube), automatización de CI/CD, y el entorno de producción en AWS reconciliado mediante GitOps.
+## Arquitectura
 
 ```mermaid
-graph TD
+flowchart TB
+    subgraph dev["Desarrollo local"]
+        DVC["DVC\n(dataset versionado)"]
+        Trainer["core_ml (train.py)"]
+        MLflowLocal["MLflow (docker-compose)"]
+        LocalStack["LocalStack\n(S3 simulado)"]
+        DVC --> Trainer
+        Trainer -- registra runs/métricas --> MLflowLocal
+        MLflowLocal -- artefactos --> LocalStack
+    end
 
-    %% Local Environment
-    subgraph LocalDev [Entorno de Desarrollo Local]
-        DevContainer[VS Code DevContainer]
+    subgraph ci["GitLab CI"]
+        LintTest["lint_test"]
+        BuildPush["build_push"]
+        Deploy["deploy"]
+        Train["train (manual)"]
+        LintTest --> BuildPush --> Deploy
+    end
 
-        subgraph DockerCompose [docker-compose: Nube Simulada]
-            LocalStack[LocalStack: S3 / SQS / Secrets Manager]
-            Postgres[PostgreSQL: RDS Local]
-            Kafka[Kafka: Bus de Eventos]
-            MLflowLocal[Servidor MLflow]
-            LocalAPI[FastAPI]
+    subgraph aws["AWS"]
+        ECR["ECR\n(imagen de la API)"]
+        subgraph eks["Cluster EKS"]
+            API["dlinear-api\n(FastAPI, Deployment + HPA)"]
+            CronJob["dlinear-batch-inference\n(CronJob)"]
+            MLflowProd["mlflow\n(Deployment)"]
+            API -. resuelve el modelo .-> MLflowProd
+            CronJob -. resuelve el modelo .-> MLflowProd
         end
-
-        Poetry[Poetry: Lockfile de Dependencias]
-
-        DevContainer -.-> Poetry
-        DevContainer -.-> DockerCompose
+        RDS["RDS Postgres\n(backend store de MLflow)"]
+        S3["S3\n(artefactos del modelo + remoto de DVC)"]
+        MLflowProd --> RDS
+        MLflowProd --> S3
+        CronJob --> S3
     end
 
-    %% CI/CD
-    subgraph CICD [GitLab CI/CD - Autenticado vía OIDC]
-        Quality[Quality Gate: lint / type-check / test / security]
-        TF_Pipeline[Terraform Plan y Apply]
-        Train[Entrenar y Registrar Modelo]
-        QGate[Quality Gate de MLflow]
-        Docker_Pipeline[Build y Push de Docker]
-        GitOpsCommit[Bump de Imagen con Kustomize: Commit a Git]
-    end
-
-    %% AWS Cloud Environment
-    subgraph AWSCloud [Entorno de Producción en AWS]
-        VPC[VPC Multi-AZ]
-
-        subgraph EKS [Clúster de Amazon EKS]
-            ArgoCD[ArgoCD: Controlador GitOps]
-            API[FastAPI: Inferencia Online]
-            HPA[Horizontal Pod Autoscaler]
-            CRON[CronJob de Inferencia por Lotes]
-            STREAM[Stream Consumer: inferencia online + drift CUSUM]
-        end
-
-        KINESIS[(Kinesis: Telemetría de Sensores)]
-        S3[S3: Artefactos de Modelo, DVC Store, Datos de Batch]
-        ECR[ECR: Registro de Contenedores]
-        RDS[(RDS PostgreSQL: Backend de MLflow + Log de Predicciones)]
-    end
-
-    %% Connections
-    LocalDev -->|git push| CICD
-
-    Quality --> TF_Pipeline
-    TF_Pipeline -->|aprovisiona vía OIDC| VPC
-    TF_Pipeline -->|aprovisiona| ECR
-    TF_Pipeline -->|aprovisiona| S3
-    TF_Pipeline -->|aprovisiona| RDS
-    TF_Pipeline -->|aprovisiona| EKS
-
-    Train -->|registra métricas, tags, modelo| S3
-    Train --> QGate
-    QGate -->|bloquea el pipeline si hay regresión| Docker_Pipeline
-    Docker_Pipeline -->|sube la imagen| ECR
-    Docker_Pipeline --> GitOpsCommit
-    GitOpsCommit -->|commitea el nuevo tag de imagen a main| LocalDev
-
-    ArgoCD -->|observa kubernetes/overlays/production| GitOpsCommit
-    ArgoCD -->|reconcilia: prune + selfHeal| API
-    ArgoCD -->|reconcilia| CRON
-
-    API <-->|descarga la imagen| ECR
-    CRON <-->|descarga la imagen| ECR
-
-    API <-->|lectura segura vía IRSA| S3
-    CRON <-->|lee inputs / escribe outputs| S3
-
-    KINESIS -->|lecturas horarias de sensores| STREAM
-    STREAM -->|predicciones a 1 paso + residuos reconciliados| RDS
-    STREAM -->|alerta CUSUM confirmada| MIT[mitigation.py: cooldown + techo]
-    MIT -->|API de Pipeline Trigger, AUTO_RETRAIN=true| CICD
-
-    HPA -->|escala pods según CPU/RAM| API
-    EKS -->|tráfico restringido solo por SG| RDS
+    Trainer -. dvc push / mlflow .-> S3
+    BuildPush --> ECR
+    Deploy --> eks
+    ECR --> API
+    ECR --> CronJob
+    Train -. python -m src.train + quality_gate .-> MLflowProd
 ```
 
-### Flujo de Datos
+Cada componente principal responde a una decisión de diseño concreta:
 
-1. **Ingesta y validación.** Las lecturas crudas de los sensores ETT (7 canales numéricos, horarios) se cargan y se verifican inmediatamente contra un contrato de datos con Pydantic — esquema, tipos de dato, nulabilidad, rangos de valores por columna — antes de iniciar cualquier preprocesamiento.
-2. **Ingeniería de features.** `data_processing.py` deriva features temporales (mes, día, hora), escala la serie y construye ventanas deslizantes para el modelo DLinear.
-3. **Entrenamiento.** `train.py` ejecuta una búsqueda de hiperparámetros con Optuna, entrena la red DLinear, y registra métricas, parámetros y tags de reproducibilidad en MLflow — empaquetando la red entrenada junto con sus escaladores de entrada/salida en un único modelo `pyfunc` personalizado.
-4. **Registro y quality gate.** El modelo entrenado se registra en el MLflow Model Registry. `quality_gate.py` solo avanza el alias `production` si el candidato es al menos tan bueno como el modelo actualmente en producción.
-5. **Servicio (Serving).** Tanto la API como el CronJob de batch resuelven el modelo por `nombre@alias_production` desde el registry al arrancar — nunca desde una ruta de archivo — y sirven predicciones online o escriben predicciones por lotes de vuelta a S3, según corresponda. `POST /predict` devuelve `predictions`, una lista de 48 valores (uno por cada hora pronosticada); el scoring por lotes escribe una columna `Prediction_h1..Prediction_hN` por fila para el mismo horizonte.
-6. **Despliegue.** El CI construye y sube la imagen del contenedor, y luego edita el tag de imagen del overlay de Kustomize y lo commitea a `main`. ArgoCD detecta el cambio en Git y reconcilia el clúster — el CI nunca toca directamente el servidor de la API del clúster.
-7. **Inferencia por streaming y mitigación.** [`stream_consumer.py`](core_ml/src/monitoring/stream_consumer.py) lee lecturas de sensores desde Kinesis, produce una predicción a 1 hora vista por cada 48 horas de ventana acumulada, y reconcilia las anteriores en residuos. Dos rastreadores CUSUM vigilan un corrimiento físico del sensor (drift de datos) y un corrimiento en la propia exactitud del modelo (concept drift); una alerta confirmada puede lanzar un reentrenamiento acotado y protegido por cooldown a través del mismo pipeline de CI — devuelto al paso 3 vía la API de Pipeline Trigger de GitLab — sin saltarse nunca el quality gate del paso 4.
+- **El modelo nunca viaja como un `.pth`/`.pkl` suelto.** `train.py`
+  empaqueta la red DLinear junto con sus scalers de entrada/salida en un
+  único artefacto `mlflow.pyfunc`
+  (`core_ml/src/mlflow_utils.py::DLinearForecaster`) y registra una nueva
+  versión en el MLflow Model Registry. Tanto la API como el job de batch
+  lo cargan por nombre y alias (`models:/dlinear-ett-forecaster@production`)
+  -- una referencia inmutable y versionada, en vez de una ruta en disco
+  que podría desincronizarse del código que la generó.
+- **Un quality gate se interpone entre "entrenado" y "sirviendo
+  tráfico."** `core_ml/src/quality_gate.py` compara el MSE de test de la
+  última versión registrada contra la que hoy tiene el alias `production`,
+  y solo mueve ese alias si la candidata es al menos igual de buena -- la
+  promoción es una decisión que el pipeline hace cumplir, no un efecto
+  secundario de entrenar.
+- **Una sola imagen de contenedor, dos puntos de entrada.** La imagen que
+  construye CI (`Dockerfile`) sirve `/predict` vía `uvicorn` y corre
+  `python -m src.batch_inference` como CronJob de Kubernetes. Ambos
+  caminos cargan el modelo con la misma referencia de registry y el mismo
+  código de `DLinearForecaster.predict()` -- una sola implementación de
+  inferencia, no dos que puedan divergir en silencio.
+- **La API trata al Model Registry como una dependencia que puede
+  fallar.** La carga del modelo pasa por un retry con backoff exponencial
+  acotado envuelto en un circuit breaker (`pybreaker`): si el registry no
+  responde, el pod sigue vivo y se reporta como no-listo (`/health` vs
+  `/ready`) en vez de entrar en un crash-loop o servir resultados
+  obsoletos.
+- **La detección de drift es un chequeo estadístico, no un subsistema.**
+  `core_ml/src/monitoring/drift_check.py` compara la media por sensor de
+  cada batch contra un perfil de referencia capturado al entrenar
+  (z-score, |z| > 3 marca una feature como drift) y loguea el resultado --
+  sin cola externa, sin historial persistido y sin acción automática;
+  decidir qué hacer ante una señal de drift es una decisión humana, no
+  una heurística.
+- **La infraestructura se aprovisiona una vez, se aplica de forma
+  continua.** `terraform/` gestiona la VPC, el cluster EKS, la instancia
+  RDS, el bucket S3, el repositorio ECR y los roles de IAM como estado
+  versionado; `.gitlab-ci.yml` solo toca la capa de aplicación
+  (`kubectl apply -k`) sobre esa infraestructura ya fija, así que las dos
+  capas cambian a ritmos distintos.
+- **CI se autentica contra AWS con credenciales de corta vida y alcance
+  acotado.** La identidad OIDC de GitLab federa contra un rol de IAM
+  dedicado (`GitLabCI_OIDC_Role`, `terraform/iam.tf`), restringido a la
+  rama `main` de este proyecto y asumido por una sesión de una hora -- no
+  hay una access key de larga duración guardada como variable de CI que
+  rotar o que se pueda filtrar.
 
----
-
-## Stack Tecnológico
-
-| Categoría | Herramientas Utilizadas | Propósito en el Proyecto |
-|---|---|---|
-| **Machine Learning** | PyTorch, DLinear, Optuna | Modelo de predicción multivariada de series temporales y búsqueda de hiperparámetros. |
-| **Tracking y Registry** | MLflow (Tracking + Model Registry, aliases) | Tracking de experimentos, versionado inmutable de modelos, promoción con quality gate. |
-| **Datos y Reproducibilidad** | DVC (respaldado por S3), Pydantic | Versionado de datasets/modelos y contratos de datos fail-fast. |
-| **Serving de API** | FastAPI, Uvicorn | Endpoint de inferencia online de baja latencia. |
-| **Contenerización** | Docker, Docker Compose | Imagen única y reproducible para inferencia online + batch; emulación completa de la nube local. |
-| **Orquestación** | Kubernetes, Amazon EKS, Kustomize | Scheduling de cargas de trabajo en producción, gestión de configuración estructural (sin templates). |
-| **GitOps** | ArgoCD | Reconciliación continua del estado del clúster desde Git, con auto-corrección de drift. |
-| **Simulación de Nube Local** | LocalStack, Apache Kafka, Testcontainers | Emulación de S3/SQS/Secrets Manager y pruebas de integración con contenedores efímeros. |
-| **Infraestructura como Código** | Terraform | Aprovisionamiento declarativo de VPC, EKS, RDS, S3, ECR, IAM. |
-| **CI/CD** | GitLab CI/CD, OpenID Connect, gitlab-ci-local, runners self-hosted (Docker local + EKS) | Pipelines autenticados vía OIDC; validación local de jobs antes de hacer push; ejecución real sin consumir minutos compartidos de GitLab.com. |
-| **Observabilidad y Resiliencia** | structlog, tenacity, pybreaker | Logging estructurado en JSON, reintentos acotados con backoff, circuit breaking. |
-| **Streaming y Detección de Drift** | Amazon Kinesis Data Streams, CUSUM (test de Page) | Ingesta de telemetría de sensores; detección de drift de datos/concepto vía estadística de cambio de punto, no una librería de forma de distribución. |
-| **Mitigación y Promoción Automáticas** | API de Pipeline Trigger de GitLab, alias del MLflow Model Registry | Reentrenamiento automático acotado por cooldown y techo ante una alerta de drift confirmada; la comparación producción-vs-candidato de `quality_gate.py` (con tolerancia y rollback de un paso) condiciona toda promoción. |
-| **Servicios Cloud** | Amazon S3, ECR, RDS PostgreSQL, Kinesis, VPC | Almacenamiento gestionado, registry, base de datos, streaming y redes. |
-| **Desarrollo Local** | DevContainers, Poetry, Makefile | Entorno estandarizado, dependencias deterministas, interfaz de ejecución única. |
-| **Calidad de Código** | Ruff, Black, isort, mypy, pytest, Bandit, Trivy, yamllint, detect-secrets | Análisis estático shift-left, formateo, tipado, pruebas y escaneo de seguridad. |
-| **Seguridad** | IRSA, AWS STS, redes zero-trust | Credenciales de corta duración y alcance acotado; sin secretos de larga vida en el código de la aplicación. |
-
----
-
-## El Pipeline de MLOps
-
-### Pipeline de Datos
-
-El entrenamiento y la inferencia nunca confían ciegamente en el input crudo. `core_ml/src/data_contracts.py` declara un esquema basado en Pydantic para el dataset ETT — columnas requeridas, tipos de dato, nulabilidad y rangos de valores por feature, calibrados contra la serie completa ETTh1. `data_processing.py`, `batch_inference.py` y el modelo `PredictionRequest` de la API validan todos contra este contrato (o contra las restricciones de campo equivalentes de Pydantic, en el caso de la API) y rechazan inmediatamente — `DataContractError` en local, HTTP 422 en el borde de la API — en lugar de gastar cómputo en una corrida condenada a fallar, o peor, producir silenciosamente predicciones basura. Este es el principio **fail-fast** aplicado a los datos, no solo al código.
-
-Para iterar rápido, `core_ml/data/toy/ETTh1_toy.csv` es un slice fijo y representativo de ~1.000 filas del dataset completo — mismo esquema, mismo contrato, menos filas — versionado con DVC. `make train-toy` corre todo el pipeline en segundos, de modo que el ciclo completo se ejercita localmente antes de tocar jamás el dataset completo o una GPU.
-
-`core_ml/data/{raw,toy}/*.csv` están rastreados con DVC, respaldados por el mismo bucket de S3 usado para los artefactos de modelo. Solo los pequeños archivos puntero `.dvc` (hashes de contenido) se commitean a Git; `dvc pull`/`dvc push` mueven los bytes reales. Esta es la base de la tupla de reproducibilidad descrita a continuación.
-
-### Pipeline de Entrenamiento
-
-`train.py` ejecuta una búsqueda de hiperparámetros con Optuna sobre la arquitectura DLinear y entrena la configuración ganadora. Cada corrida queda atada, vía `mlflow_utils.py::build_reproducibility_tags()`, a cinco coordenadas registradas como tags y parámetros de MLflow:
-
-```
-Hash del Commit de Git + Hash de Datos de DVC + Hiperparámetros + ID de la Corrida de MLflow + Tag de la Imagen del Contenedor
-```
-
-Cualquier modelo en el registry puede, por lo tanto, rastrearse hasta el código, los datos, la configuración y la imagen de contenedor exactos que lo produjeron — un requisito indispensable para depurar un incidente en producción o auditar la procedencia de un modelo.
-
-No existe ningún `model.pkl` suelto en ningún directorio de este repositorio ni de sus contenedores desplegados. `train.py` empaqueta la red DLinear entrenada junto con sus escaladores de entrada/salida en un único `mlflow.pyfunc.PythonModel` personalizado y lo registra en el MLflow Model Registry como un artefacto inmutable y versionado.
-
-### Pipeline de Despliegue (CI/CD)
-
-Cada push dispara un pipeline de GitLab CI/CD autenticado contra AWS vía OIDC (sin credenciales de usuario IAM de larga duración). Los stages corren estrictamente en secuencia, de modo que un fallo en cualquier etapa bloquea todo lo posterior:
+## Estructura del repositorio
 
 ```
-push a main
-  -> quality        (make ci: lint, formato, tipos, tests, seguridad; escaneo con Trivy)
-  -> plan            (terraform plan)
-  -> apply            (terraform apply, solo en la rama main)
-  -> train             (búsqueda con Optuna, logging y registro en MLflow)
-  -> quality-gate       (el modelo candidato debe superar a producción o el pipeline se detiene)
-  -> build-push          (imagen Docker construida y subida a ECR, etiquetada con el SHA del commit)
-  -> deploy               (bump de imagen con Kustomize, commiteado a main con [skip ci])
-```
-
-El stage final `deploy` nunca toca directamente el servidor de la API de Kubernetes: realiza un `kustomize edit set image` estructural sobre `kubernetes/overlays/production/`, commitea el cambio, y hace push con un marcador `[skip ci]` para evitar un loop de pipeline auto-disparado. ArgoCD, corriendo dentro del clúster, detecta el nuevo commit y reconcilia el clúster para que coincida — el CI propone, GitOps dispone.
-
----
-
-## Modelo de Seguridad
-
-La seguridad se aplica tanto en la capa de identidad como en la de red.
-
-- **IAM Roles for Service Accounts (IRSA).** Los pods que corren la API y el job de batch acceden a S3 mediante credenciales de AWS STS de corta duración, inyectadas dinámicamente por EKS. Ninguna clave de AWS se guarda en Secrets de Kubernetes ni se hardcodea en la aplicación.
-- **Integración OIDC de GitLab.** El pipeline de CI/CD se autentica contra AWS vía OpenID Connect (`aws_iam_openid_connect_provider` más un claim `sub` acotado a este proyecto/rama exactos), eliminando por completo las credenciales de usuario IAM de larga duración del CI.
-- **Separación de mínimo privilegio.** El rol de GitLab CI usado para entrenamiento/build está acotado únicamente al repositorio de ECR y al bucket de S3 que realmente necesita; el rol de `apply` de Terraform se mantiene separado. Un job de build o entrenamiento comprometido no puede escalar a administrador de infraestructura.
-- **Aislamiento de red.** La instancia de RDS PostgreSQL vive en subredes privadas; su Security Group solo permite tráfico desde el Security Group asociado a los nodos worker de EKS, en lugar de depender de rangos CIDR amplios.
-- **GitOps como frontera de seguridad.** El CI nunca posee credenciales de administrador del clúster — solo puede proponer un cambio en Git. ArgoCD, corriendo dentro del clúster con su propio acceso acotado, es el único actor que jamás muta el estado del clúster.
-
----
-
-## Monitoreo y Observabilidad
-
-- **Logging estructurado.** `api/logging_config.py` y `core_ml/src/logging_config.py` configuran `structlog` una vez por proceso: un objeto JSON de una sola línea por evento (`event`, `level`, `timestamp`, más campos estructurados como `model_uri`, `duration_ms`, `n_predictions`) cuando la salida estándar no es una TTY, y un renderer legible y coloreado en una terminal interactiva. JSON por línea es exactamente lo que CloudWatch Logs Insights o Elasticsearch necesitan para filtrar y agregar por campo, en lugar de aplicar regex sobre texto libre.
-- **Seguimiento de latencia.** Cada llamada a `/predict` registra su duración en milisegundos junto con la versión de modelo resuelta, dando una vista por request y por versión de modelo de la latencia de serving directamente en el flujo de logs.
-- **Resiliencia: reintentos acotados y circuit breaker.** `api/main.py` envuelve la carga del MLflow Model Registry con `tenacity` (backoff exponencial acotado, máximo tres intentos — nunca infinito) y `pybreaker` (tras cinco fallos consecutivos, el breaker se abre y falla rápido durante 60 segundos en lugar de seguir golpeando un registry caído). `core_ml/src/batch_inference.py` aplica el mismo reintento acotado a sus llamadas a S3.
-- **Detección de drift de infraestructura.** ArgoCD corre con `prune: true` y `selfHeal: true`: cualquier cambio manual con `kubectl` o drift de configuración en el clúster se detecta automáticamente y se revierte para coincidir con Git, de modo que el estado real del clúster nunca puede divergir silenciosamente de su estado declarado.
-- **Degradación elegante en lugar de crash-looping.** El arranque de la API no trata "todavía no hay ningún modelo `production` registrado" como un error fatal: `/health` (liveness) siempre responde 200, mientras que `/ready` y `/predict` responden 503 hasta que se promueve un modelo — la semántica correcta de Kubernetes para separar "el proceso está vivo" de "el proceso está listo para servir".
-
-- **Ingesta de telemetría por streaming (Amazon Kinesis).** [`terraform/kinesis.tf`](terraform/kinesis.tf) aprovisiona un Kinesis Data Stream on-demand; [`scripts/sensor_simulator.py`](core_ml/scripts/sensor_simulator.py) reproduce las lecturas horarias históricas de ETTh1 hacia él (no hay un sensor real en este portafolio del que transmitir — la misma situación que 610-hotel-booking-mlops resuelve con su propio `replay_bookings.py`). Kinesis, no Kafka: este dominio es un solo sensor físico, no muchos productores de eventos independientes, y el modelo más simple de iterador por shard de Kinesis encaja mejor que un broker basado en grupos consumidores.
-- **Inferencia online + detección de drift por CUSUM.** [`core_ml/src/monitoring/stream_consumer.py`](core_ml/src/monitoring/stream_consumer.py) consume ese stream: por cada 48 lecturas horarias consecutivas que acumula, le pide al modelo servido la temperatura de aceite de la *siguiente* hora y registra esa predicción a 1 paso ([`drift_store.py`](core_ml/src/monitoring/drift_store.py), un segundo schema en la misma instancia de RDS que ya usa el backend de MLflow); cada lectura nueva es también una oportunidad de reconciliar una predicción anterior en un residuo. Dos detectores CUSUM (test de Page) de dos colas independientes — [`changepoint.py`](core_ml/src/monitoring/changepoint.py) — vigilan, respectivamente, las siete lecturas crudas de sensores en busca de un corrimiento físico de nivel (drift de datos) y los residuos reconciliados en busca de un corrimiento en la propia exactitud del modelo (concept drift). CUSUM, no histogramas PSI/Jensen-Shannon: esos encajan con atributos categóricos por reserva (el propio dominio de 610); una lectura física continua de una sola máquina en el tiempo es una pregunta de corrimiento de nivel, exactamente lo que la detección de cambio de punto está construida para responder.
-- **Mitigación automática acotada.** Una alerta CUSUM confirmada llega a [`mitigation.py`](core_ml/src/monitoring/mitigation.py), que puede lanzar un reentrenamiento vía la API de Pipeline Trigger de GitLab — acotado por un cooldown (un disparo por incidente) y un techo duro de reentrenamientos automáticos por ventana móvil, de modo que una fuente de drift que un reentrenamiento no puede arreglar llegue a un humano en vez de disparar para siempre. Lo que no puede hacer es promover nada: [`quality_gate.py`](core_ml/src/quality_gate.py) ya se negaba a mover el alias `production` sin comparar un candidato contra lo que está sirviendo actualmente, y esa comparación — ahora con un `--tolerance` configurable y `--rollback` de un paso — sigue estando entre cada reentrenamiento, automático o manual, y el tráfico de producción.
-
----
-
-## Primeros Pasos
-
-Para garantizar que el código se comporte de forma idéntica en la nube, valídalo primero contra la réplica local.
-
-### 1. Inicializar el Entorno
-
-Abre el repositorio en VS Code usando la extensión Dev Containers. Esto aprovisiona Python, Poetry, `make`, Terraform, la AWS CLI, Docker-in-Docker y `pre-commit` — sin necesidad de instalar Python localmente.
-
-### 2. Instalar Dependencias y Git Hooks
-
-```bash
-make install   # poetry install --sync para api/ y core_ml/ (determinista, desde poetry.lock)
-make hooks     # instala los git hooks de pre-commit (pre-commit + pre-push)
-```
-
-Ambos subproyectos (`api/` y `core_ml/`) son proyectos Poetry independientes, cada uno con su propio `poetry.lock`, de modo que el conjunto de dependencias instalado aquí es idéntico, byte a byte, al que instalan el CI y el contenedor de producción.
-
-### 3. Levantar el Stack de Emulación Local
-
-```bash
-make up   # docker compose up -d --build --wait
-```
-
-Esto levanta toda la nube simulada, en orden de dependencias (Postgres/LocalStack saludables -> MLflow saludable -> API):
-
-- PostgreSQL (emulación de RDS)
-- LocalStack (S3 + SQS + Secrets Manager — auto-aprovisionado, ver `localstack/init/`)
-- Kafka (KRaft, un solo broker)
-- MLflow (tracking + registry, respaldado por los dos anteriores)
-- FastAPI
-
-`make down` lo detiene; `make logs` / `make ps` lo inspeccionan mientras corre.
-
-### 4. Entrenar y Servir
-
-Corre todo el pipeline de extremo a extremo primero contra el dataset toy de ~1.000 filas — la validación del contrato de datos, el preprocesamiento, el entrenamiento y el registro en MLflow se completan en segundos, sin necesidad de GPU:
-
-```bash
-make train-toy
-```
-
-Luego promuévelo para que la API pueda tomarlo:
-
-```bash
-cd core_ml && poetry run python -m src.quality_gate
-```
-
-El servicio local de FastAPI (apuntando al stack de MLflow de docker-compose) resuelve el modelo por nombre y alias `production` al arrancar — sin copiar artefactos manualmente. Una vez que tengas confianza, corre los mismos pasos contra el dataset completo (`make data-raw` + `poetry run python -m src.train --dataset raw`).
-
-Con un modelo `production` en su lugar, ejercita el lado de streaming de la misma forma — [`scripts/sensor_simulator.py`](core_ml/scripts/sensor_simulator.py) reproduciendo lecturas hacia el stream de Kinesis en LocalStack y [`stream_consumer.py`](core_ml/src/monitoring/stream_consumer.py) consumiéndolas, ambos contra el mismo camino de código que corre en producción, sin ninguna cuenta real de AWS de por medio:
-
-```bash
-make stream-local   # todo desde un stack en frío: up -> train-toy -> quality-gate -> stream-up -> stream-replay
-make stream-logs     # sigue los veredictos CUSUM del consumidor y los intentos de mitigación
-```
-
-### 5. Validar Antes de Comitear
-
-El `Makefile` es el único punto de entrada para toda verificación de calidad — exactamente los mismos targets corren localmente (vía git hooks) y en el CI:
-
-```bash
-make lint          # Ruff
-make format         # isort + Black (auto-corrige)
-make format-check    # isort + Black (solo verifica, usado en CI)
-make type-check       # mypy
-make test              # pytest + cobertura
-make security           # Bandit (SAST)
-make yaml-lint           # yamllint sobre todos los manifiestos de CI/K8s/compose
-make secrets-scan         # detect-secrets
-make trivy                 # escaneo de vulnerabilidades de dependencias/IaC (requiere Docker)
-make ci                     # todo lo anterior, de una sola vez -- idéntico al stage "quality" del CI
-```
-
-`pre-commit` (instalado por `make hooks`) impone esto automáticamente: un commit se rechaza si falla el formateo, el linting, el chequeo de tipos, los tests, la sintaxis YAML, o si se detecta un secreto filtrado. Ver [Calidad de Código y Validación Shift-Left](#calidad-de-código-y-validación-shift-left) más abajo.
-
-Los cambios de Terraform y Kubernetes reciben el mismo trato — sin credenciales de AWS, sin clúster, sin costo:
-
-```bash
-make tf-fmt        # terraform fmt -check
-make tf-validate     # terraform init -backend=false + validate (solo descarga providers/módulos)
-make k8s-build        # renderiza con kustomize el overlay de producción - los manifiestos exactos que ArgoCD aplicaría
-```
-
-### 6. Validar el Pipeline de CI/CD Completo, Localmente
-
-Todavía no se sube nada a GitLab. `gitlab-ci-local` lee el mismo `.gitlab-ci.yml` y ejecuta cualquier job dentro de contenedores Docker en esta máquina, byte a byte igual que un runner real — así los errores de sintaxis, imágenes base o `before_script` se detectan y corrigen aquí, sin gastar minutos de CI ni abrir un pipeline roto en GitLab:
-
-```bash
-make ci-local-list             # valida sintaxis/stages/needs de .gitlab-ci.yml, sin ejecutar nada
-make ci-local JOB=python:quality   # corre un job puntual (uso: JOB=<nombre-del-job>)
-```
-
-> En Windows/Git Bash, `make ci-local` ya exporta `MSYS_NO_PATHCONV=1` — sin esto, Git Bash reescribe las rutas internas (`/builds/...`) que `gitlab-ci-local` pasa a `docker create`, y el job falla con `the working directory '...' is invalid` antes de ejecutar una sola línea del script.
-
-### 7. Runner Self-Hosted: el pipeline REAL, sin gastar minutos de GitLab
-
-`gitlab-ci-local` (paso 6) simula el pipeline *antes* del push. Para que GitLab también ejecute el pipeline *real* (el que dispara automáticamente en cada push) sin tocar los runners compartidos de GitLab.com, este mismo hardware se registra como runner self-hosted. Es la misma estrategia que ya usa `kubernetes/gitlab-runner/` para `train_model`/`quality_gate` (tag `in-vpc`, dentro del cluster EKS porque necesita el DNS interno de MLflow) — aquí se extiende con un segundo runner, en tu propio PC, para el resto de los jobs (`local-hardware`): quality, terraform, build-push y deploy.
-
-Bootstrap (una sola vez):
-
-```bash
-# 1. GitLab.com -> proyecto (o grupo) -> Settings -> CI/CD -> Runners -> "New runner"
-#    -> tags: local-hardware -> "Run untagged jobs": No -> copiar el token (glrt-...)
-make runner-register TOKEN=glrt-xxxxx   # registra este PC (token queda solo en un volumen Docker, nunca en Git)
-make runner-up                          # lo deja corriendo 24/7 (--restart always)
-make runner-status                      # confirma que quedó conectado ("is alive")
-```
-
-A partir de aquí, cada push a GitLab despacha el pipeline completo a runners que corren en tu propia infraestructura (este PC + el pod dentro de EKS) — el contador de minutos compartidos de GitLab.com no se mueve. La autenticación contra AWS sigue siendo OIDC de corta duración (`.aws-auth`/`.aws-auth-terraform` en `.gitlab-ci.yml`); mover un job de runner nunca implica volver a credenciales estáticas.
-
-`make runner-logs` sigue en vivo qué job está corriendo; `make runner-down` detiene el contenedor sin perder el registro (para volver a levantarlo con `make runner-up`).
-
-### 8. Comitear y Desplegar
-
-Una vez completada la validación local (pasos 5-6) y con el runner self-hosted activo (paso 7), sube los cambios a GitLab. El pipeline de CI/CD automáticamente corre el mismo quality gate shift-left en cada push, planifica y aplica cambios de infraestructura, entrena y evalúa un nuevo modelo con el quality gate, construye y sube la imagen del contenedor, y — solo en `main` — actualiza el tag de imagen de Kustomize para que ArgoCD pueda reconciliar el clúster.
-
----
-
-## Calidad de Código y Validación Shift-Left
-
-Este proyecto trata el desarrollo local como el primer y más barato lugar para detectar problemas ("local-first"). Toda verificación que pueda correr antes de que un commit llegue al remoto, corre ahí.
-
-| Aspecto | Herramienta | Aplicado por |
-|---|---|---|
-| Determinismo de dependencias | Poetry + `poetry.lock` (uno por subproyecto) | `make install` |
-| Orden de imports | isort (`profile = black`) | pre-commit + `make format` |
-| Formateo de código | Black | pre-commit + `make format` |
-| Linting estático | Ruff | pre-commit + `make lint` |
-| Chequeo de tipos | mypy | pre-commit (hook local, venv real de Poetry) + `make type-check` |
-| Pruebas unitarias | pytest + cobertura | pre-commit (hook local) + `make test` |
-| SAST / linting de seguridad | Bandit | pre-commit + `make security` |
-| Escaneo de vulnerabilidades de dependencias/IaC | Trivy | hook de pre-push + CI (`security:trivy`) |
-| Sintaxis y estilo YAML | `check-yaml` + yamllint | pre-commit + `make yaml-lint` |
-| Detección de secretos | detect-secrets | pre-commit (bloquea el commit) |
-| Higiene general de archivos | pre-commit-hooks | espacios en blanco, archivos grandes, conflictos de merge, sintaxis TOML/JSON |
-
-Un commit se **rechaza automáticamente** si falla el linting, el formateo, el chequeo de tipos o las pruebas, si un archivo YAML es inválido, o si se detecta un secreto probable. Trivy corre en `git push` (y en el CI) en lugar de en cada commit, ya que un escaneo completo de vulnerabilidades es demasiado lento para el ciclo de feedback al comitear.
-
-El `Makefile` (`make help` lista todos los targets) es la interfaz única para todo esto — localmente y en el stage `quality` de `.gitlab-ci.yml` — de modo que nunca hay una discrepancia entre "pasó en mi máquina" y "pasó en el CI".
-
----
-
-## Estructura del Repositorio
-
-```text
-612 Forecasting Oil Temperature MLOPS/
-├── .devcontainer/                 # Entorno de desarrollo local estandarizado
-│   ├── Dockerfile                 # Poetry, make, pre-commit, Terraform, AWS CLI
-│   └── devcontainer.json
-├── .gitlab-ci.yml                 # Pipeline de CI/CD (quality gate, Terraform, Docker, K8s) vía OIDC
-├── .pre-commit-config.yaml        # Git hooks shift-left (lint/formato/tipos/test/secretos/YAML)
-├── .yamllint.yml                  # Reglas de estilo YAML
-├── .secrets.baseline              # Baseline de detect-secrets (hallazgos auditados)
-├── .trivyignore                   # Hallazgos de Trivy explícitamente aceptados, con justificación
-├── .dvc/                          # Configuración del remoto de DVC (versionado de datos/modelos en S3)
-├── .dvcignore
-├── localstack/init/                # Scripts de bootstrap: aprovisiona S3/SQS/Secrets Manager al iniciar
-├── docker-compose.yml              # Postgres, LocalStack, Kafka, MLflow, API -- la nube simulada
-├── Makefile                       # Interfaz de ejecución única -- local == CI
-├── terraform/                     # Definiciones de IaC (AWS)
-│   ├── ecr.tf                     # Registro de contenedores y políticas de retención
-│   ├── eks.tf                     # Clúster de Kubernetes v1.36 con OIDC/IRSA
-│   ├── iam.tf                     # Roles IAM y service accounts
-│   ├── provider.tf                # Configuración de AWS y estado remoto en S3
-│   ├── rds.tf                     # Backend de PostgreSQL con SG zero-trust
-│   ├── s3.tf                      # Almacenamiento versionado para artefactos de ML
-│   ├── variables.tf                # Variables de entorno
-│   └── vpc.tf                      # Redes multi-AZ y subredes
-├── kubernetes/                    # Kustomize: base + overlays (gestionado por GitOps vía ArgoCD)
-│   └── base/, overlays/production/
-├── gitops/argocd/                 # Manifiesto de la Application de ArgoCD + instrucciones de bootstrap
-├── core_ml/                       # Entrenamiento del modelo y pipeline offline (proyecto Poetry propio)
-│   ├── pyproject.toml / poetry.lock
-│   ├── data/
-│   │   ├── raw/ETTh1.csv.dvc      # Dataset completo, rastreado con DVC (17.420 filas)
-│   │   └── toy/ETTh1_toy.csv.dvc  # Dataset toy de ~1.000 filas para corridas E2E rápidas
+.
+├── api/                        # Servicio de inferencia FastAPI
+│   ├── main.py
+│   └── tests/
+├── core_ml/                    # Datos, entrenamiento, MLflow, quality gate
 │   ├── src/
-│   │   ├── data_contracts.py      # Contrato de datos con Pydantic + validación fail-fast
-│   │   ├── data_processing.py     # Preprocesamiento de series temporales (validado por contrato)
-│   │   ├── model_architecture.py  # Red DLinear -- única fuente de verdad
-│   │   ├── train.py               # Loop de entrenamiento (Optuna) + logging/registro en MLflow
-│   │   ├── mlflow_utils.py        # Tags de reproducibilidad + empaquetado del modelo pyfunc
-│   │   ├── quality_gate.py        # Promueve una versión de modelo a `production` o bloquea el CI
-│   │   ├── events.py               # Publicación de eventos a Kafka en modo best-effort
-│   │   ├── logging_config.py       # structlog: logs JSON en prod, legibles en local
-│   │   └── batch_inference.py      # Script de scoring masivo offline sobre S3 (envuelto en reintentos)
-│   └── tests/                      # Pruebas unitarias con pytest, más tests/integration/ (Testcontainers)
-├── api/                           # Lógica de inferencia online (proyecto Poetry propio)
-│   ├── pyproject.toml / poetry.lock
-│   ├── logging_config.py          # structlog: logs JSON en prod, legibles en local
-│   ├── main.py                    # /health, /ready, /predict -- tenacity + pybreaker en la carga del modelo
-│   └── tests/                     # Pruebas unitarias con pytest para main.py
-├── Dockerfile                     # Imagen de producción (instala api/ solo vía poetry.lock)
-├── README.md                      # Este archivo, en inglés
-└── README_es.md                   # Traducción al español
+│   │   ├── data_processing.py
+│   │   ├── train.py
+│   │   ├── model_architecture.py   # DLinear (PyTorch)
+│   │   ├── mlflow_utils.py
+│   │   ├── quality_gate.py
+│   │   ├── batch_inference.py
+│   │   └── monitoring/
+│   │       └── drift_check.py      # chequeo de drift (z-score)
+│   ├── data/                   # Datasets versionados por DVC (toy + raw)
+│   └── tests/
+├── terraform/                  # Infraestructura AWS (VPC, EKS, RDS, S3, ECR, IAM)
+├── kubernetes/
+│   ├── base/                   # Deployment, Service, HPA, CronJob, MLflow, namespace
+│   └── overlays/production/    # valores por entorno (tag de imagen, bucket, endpoint RDS)
+├── docker-compose.yml           # Stack local: Postgres, LocalStack, MLflow, API
+├── Dockerfile                   # Imagen de la API + batch inference
+├── core_ml/train.Dockerfile     # Imagen de entrenamiento
+└── .gitlab-ci.yml
 ```
 
----
+## Stack tecnológico
 
-## Decisiones Arquitectónicas y Trade-offs
+| Capa | Elección | Por qué |
+|---|---|---|
+| Modelo | PyTorch, DLinear | Baseline lineal fuerte y rápido para pronóstico a horizontes largos; mantiene el foco en la plataforma |
+| Búsqueda de hiperparámetros | Optuna | Búsqueda de learning rate sobre un proxy de validación, logueada como parte del run |
+| Tracking y registry | MLflow (backend Postgres, artefactos en S3) | Fuente única de verdad del historial de runs y de qué versión es `production` |
+| Versionado de datos | DVC (remoto S3/LocalStack) | Cada corrida de entrenamiento es reproducible a partir de un hash de contenido, no solo de un nombre de archivo |
+| Servido | FastAPI + Uvicorn | Superficie HTTP chica, tipada y async-friendly para `/predict` |
+| Resiliencia | `tenacity` (retry), `pybreaker` (circuit breaker) | Reintentos acotados y fail-fast ante una dependencia externa (el registry) |
+| Containerización | Docker | Una sola imagen para la API y el CronJob de batch |
+| Orquestación | Kubernetes (EKS), Kustomize | Manifiestos declarativos, overlays por entorno, sin necesidad de un motor de templates a esta escala |
+| Infraestructura como código | Terraform (proveedor AWS + módulos de la comunidad) | VPC, EKS, RDS, S3, ECR, IAM como estado versionado y revisable |
+| CI/CD | GitLab CI, OIDC contra AWS | Lint/test, build & push, deploy -- credenciales de nube de corta vida, sin claves estáticas |
+| Gestión de dependencias | Poetry (`api/` y `core_ml/` como proyectos separados) | Instalaciones deterministas a partir de un lockfile commiteado |
+| Calidad de código | Ruff, mypy, pytest, pre-commit | Lint/formato rápido, tipado opcional, tests unitarios con mocks |
 
-Cada decisión no obvia listada abajo fue tomada deliberadamente, con un trade-off explícito — no por defecto ni por convención.
+## Cómo correrlo en local
 
-**FastAPI sobre Flask.** La API de inferencia necesita validar payloads de request profundamente anidados (una secuencia de 48 lecturas horarias de sensores, cada una con sus propias restricciones a nivel de campo) y se beneficia del soporte async nativo y de la documentación OpenAPI automática. El diseño de FastAPI, centrado en Pydantic, permite que la misma librería de validación usada en los contratos de datos (`core_ml/src/data_contracts.py`) sirva también como esquema de request de la API, manteniendo un único modelo mental de validación de punta a punta en lugar de dos.
+Requisitos: Docker + Docker Compose, Python 3.10, [Poetry](https://python-poetry.org/).
 
-**Inferencia híbrida (online + batch) sobre streaming puro.** Las predicciones en tiempo real de una sola secuencia y el scoring histórico a escala de gigabytes tienen perfiles de costo fundamentalmente distintos. En lugar de correr un servicio de streaming permanentemente aprovisionado para cargas de batch, una única imagen de contenedor sirve ambas: por defecto corre el servidor de FastAPI, pero un CronJob de Kubernetes sobreescribe su entrypoint en horarios de baja demanda para correr un script de scoring por lotes, y luego el pod se destruye. Una imagen, dos cargas de trabajo, sin infraestructura de streaming ociosa pagando por capacidad que no usa la mayor parte del tiempo.
+```bash
+# Instala las dependencias de ambos subproyectos Python
+make install
 
-**Aliases del MLflow Model Registry sobre `stages`.** El concepto de `stages` de MLflow (`Staging`/`Production`/`Archived`) está deprecado en favor de los aliases desde MLflow 2.9. Los aliases son un puntero mutable simple hacia una versión de modelo inmutable, lo cual mapea de forma más directa a "qué significa `production` en este momento", sin heredar la semántica de stages que el proyecto no necesita (por ejemplo, un entorno de staging formal).
+# Levanta Postgres, LocalStack (S3 simulado), MLflow y la API
+make up
 
-**Poetry sobre pip + `requirements.txt`.** Un lockfile solo es una garantía si la resolución es determinista y el archivo realmente se commitea y se instala con `--sync`. Poetry ofrece ambas cosas por construcción; un `pip freeze > requirements.txt` suelto no evita el drift de dependencias transitivas entre la máquina de un desarrollador, el CI y la imagen de producción.
+# Descarga los datasets versionados por DVC (toy + raw) -- primera vez, o
+# apuntá .dvc/config.local a LocalStack (ver .dvc/config.local.example)
+cp .dvc/config.local.example .dvc/config.local
+make dvc-pull
+```
 
-**DVC + S3 sobre un feature store completo.** Al volumen de datos y tamaño de equipo de este proyecto, un feature store (Feast, Tecton) agregaría superficie operativa — una capa de serving, un pipeline de materialización — sin un beneficio correspondiente: hay un solo dataset, un solo target, y ninguna necesidad de servir features a múltiples consumidores independientes. DVC da versionado de datasets y reproducibilidad a una fracción del costo operativo, y puede reemplazarse más adelante si la superficie de features crece.
+`docker-compose.yml` reemplaza a AWS de punta a punta: LocalStack simula
+S3 (artefactos del modelo y remoto de DVC), Postgres simula RDS, y MLflow
+y la API corren de la misma forma que en producción, contra el mismo
+contrato `MLFLOW_TRACKING_URI`/`MODEL_NAME`/`MODEL_ALIAS`.
 
-**LocalStack sobre una cuenta de sandbox de AWS compartida.** Emular S3/SQS/Secrets Manager localmente significa que cada colaborador (y cada job de CI) obtiene un entorno de AWS aislado, gratuito y desechable, en lugar de competir por una cuenta de sandbox compartida, preocuparse por estado remanente, o pagar por recursos cloud ociosos durante el desarrollo.
+Con el stack levantado:
 
-**GitOps (ArgoCD, basado en pull) sobre que el CI empuje directamente al clúster.** Si el CI tuviera credenciales de `kubectl` hacia el clúster de producción, un pipeline comprometido (o un script con errores) podría mutar el clúster de forma directa e invisible. Con ArgoCD, el radio de impacto del CI se limita a comitear un archivo a Git; solo ArgoCD, corriendo dentro del clúster con su propio acceso acotado, tiene permitido mutar el estado del clúster — y cualquier drift manual se revierte automáticamente (`selfHeal: true`).
+- API: http://localhost:8000/docs (o el puerto de
+  `docker-compose.override.yml`, si existe)
+- UI de MLflow: http://localhost:5000
 
-**Kustomize sobre Helm.** Este proyecto tiene una sola aplicación con una única diferencia legítima por entorno (el tag de imagen y un par de valores específicos de la cuenta). El modelo de Kustomize, basado en parches y sin templates, encaja mejor que introducir un motor de templating completo y una historia de versionado de charts para un solo overlay; Helm se vuelve el mejor trade-off una vez que hay múltiples entornos o la necesidad de distribuir el chart externamente.
+`make down` detiene el stack (conserva los volúmenes de datos). `make
+logs` y `make ps` siguen los logs y muestran el estado de cada servicio.
 
-**Wheel de PyTorch solo-CPU en vez del build con CUDA por defecto.** Ningún nodo de este cluster tiene GPU (el node group de inferencia es `t3.large`), y `train.py` ya resuelve el dispositivo de cómputo en tiempo de ejecución (`torch.device("cuda" if torch.cuda.is_available() else "cpu")`), así que una GPU se usaría automáticamente si alguna vez hubiera una disponible -- pero el wheel *por defecto* de `torch` en PyPI trae empaquetado el runtime completo de CUDA (varios GB de paquetes `nvidia-*`), peso muerto que nunca se ejecuta en esta infraestructura. Fijar `torch` al índice de wheels solo-CPU del propio PyTorch (`api/pyproject.toml`, `core_ml/pyproject.toml`) redujo la imagen de la API de ~8.3GB a ~1.2GB, lo que de paso corrigió timeouts de red reales y reproducibles en `docker push` bajo contención del host -- un trade-off de corrección/costo que además resolvió un problema de confiabilidad.
+## Entrenar un modelo
 
-**Publicación de eventos en Kafka en modo best-effort, no como dependencia dura.** `batch_inference.py` publica un evento de finalización después de cada corrida de batch, pero una caída del broker nunca hace fallar el pipeline — se registra una advertencia y se continúa. La observabilidad nunca debe convertirse en un punto único de fallo para el propio proceso que observa.
+```bash
+# Smoke test rápido sobre el dataset toy (~1000 filas, segundos, sin GPU)
+make train-toy
 
-**CUSUM en vez de una librería estadística de drift (sin Evidently/Prometheus/Grafana).** Un hallazgo de drift es una afirmación operativa que tiene que ser reproducible a partir de entradas documentadas; el CUSUM de dos colas en [`changepoint.py`](core_ml/src/monitoring/changepoint.py) son menos de 150 líneas de aritmética sin dependencias, no una librería cuya estrategia de binning y umbrales por defecto puede cambiar entre una versión menor y otra. Cuatro números por ventana sobre un modelo pertenecen a la misma instancia de MLflow que ya rastrea todo lo demás sobre él, no a un segundo plano de observabilidad que operar y asegurar para el volumen que maneja este proyecto.
+# Entrenamiento completo sobre el dataset ETTh1 completo
+make train
 
----
+# Compara el modelo recién entrenado contra el actual "production", y lo
+# promueve si es al menos igual de bueno
+make quality-gate
+```
 
-## Roadmap
+El entrenamiento corre dentro del contenedor `trainer`
+(`core_ml/train.Dockerfile`) para que las rutas de archivo que registra
+MLflow sean consistentes sin importar el sistema operativo del host -- un
+modelo entrenado directo en Windows registraría rutas con backslash que el
+contenedor de servido (Linux) no puede resolver. Cada corrida fija su
+semilla para ser reproducible y loguea a MLflow: hiperparámetros, métricas
+(`final_test_mse`, `final_test_mae`, ...), el modelo + sus scalers como un
+único artefacto versionado, y un perfil de referencia (media/desvío por
+feature) que usa después el chequeo de drift.
 
-- Entrega progresiva (rollouts canary o blue/green) vía Argo Rollouts, en reemplazo del rollout directo actual al actualizar la imagen.
-- Entrega progresiva (rollouts canary o blue/green) vía Argo Rollouts, en reemplazo del rollout directo actual al actualizar la imagen.
-- Soporte multi-modelo en el registry (por ejemplo, modelos por región o por segmento) detrás del mismo patrón de resolución `nombre@alias`.
-- Benchmarking de costo y rendimiento del CronJob de batch al volumen completo de datos de producción, con paralelismo autoescalado.
+El pipeline mantiene los tres splits estrictamente separados: train ajusta
+los pesos, validación conduce la búsqueda de learning rate con Optuna y el
+early stopping, y test se toca exactamente una vez, al final, para
+producir la métrica sobre la que decide el quality gate -- así esa métrica
+refleja generalización genuina, no un número que el propio proceso de
+selección ya optimizó de antemano.
 
----
+`core_ml/src/quality_gate.py` es el gate de promoción: compara la métrica
+`final_test_mse` de la última versión registrada contra la que hoy tiene
+el alias `production` en el MLflow Model Registry, y solo mueve ese alias
+si la nueva versión es al menos igual de buena. Si todavía no existe una
+versión `production`, la primera candidata se convierte en la línea base.
+Un modelo peor nunca se promueve, y el script termina con código de salida
+distinto de cero cuando rechaza una candidata, de forma que un pipeline de
+CI construido sobre él se detiene antes de desplegar una regresión.
+
+## Inferencia por lotes y monitoreo de drift
+
+`core_ml/src/batch_inference.py` corre como un CronJob diario de
+Kubernetes (`kubernetes/base/cronjob.yaml`, 02:00 UTC). Cada corrida:
+
+1. Carga el modelo `production` actual desde el MLflow Model Registry --
+   exactamente el mismo artefacto y el mismo camino de código que usa la
+   API online.
+2. Descarga el batch de entrada desde S3 y lo valida contra el mismo
+   contrato de datos (`core_ml/src/data_contracts.py`) que exige el
+   pipeline de entrenamiento, fallando rápido antes de gastar cómputo en
+   inferencia.
+3. Arma ventanas deslizantes superpuestas y las puntúa en una sola pasada
+   vectorizada por el modelo.
+4. Sube las predicciones de vuelta a S3.
+5. Corre el chequeo de drift sobre el batch recién puntuado y loguea el
+   resultado.
+
+El chequeo de drift en sí (`core_ml/src/monitoring/drift_check.py`) es a
+propósito una prueba estadística chica y autocontenida: estandariza la
+media de cada sensor en el batch contra la media/desvío capturados en los
+datos de entrenamiento, y marca una feature cuando ese z-score supera 3.
+No mantiene estado entre corridas y no toma ninguna acción más allá de
+loguear -- suficiente para responder "¿este batch todavía se parece a lo
+que vio el modelo al entrenar?", dejando en manos humanas qué hacer ante
+una señal positiva. El propio `backoffLimit` y `activeDeadlineSeconds` del
+CronJob evitan que una corrida que falla de forma persistente reintente
+para siempre.
+
+## Desplegar en AWS
+
+Es un proceso de dos pasos: primero se aprovisiona la infraestructura con
+Terraform, después se despliega la aplicación con `kubectl`/`kustomize`.
+
+```bash
+# 1. Infraestructura (una vez, o cada vez que cambia terraform/)
+cd terraform
+terraform init
+terraform plan -var="db_password=<una contraseña fuerte>"
+terraform apply -var="db_password=<la misma contraseña>"
+```
+
+Esto crea la VPC (dos AZ, un NAT Gateway), el cluster EKS (un solo node
+group administrado, con `metrics-server` instalado como add-on del
+cluster para que el HPA tenga métricas de CPU sobre las cuales escalar),
+la instancia RDS Postgres que respalda a MLflow, el bucket S3 que se usa
+tanto para artefactos de modelo como para el remoto de DVC, el
+repositorio ECR, y los roles de IAM que necesita el pipeline -- incluida
+la relación de confianza OIDC que le permite a GitLab CI asumir un rol de
+AWS sin una access key guardada. `db_password` no tiene default a
+propósito -- nunca comitees una contraseña de base de datos a Git.
+
+```bash
+# 2. Configuración manual, una sola vez por cluster (no la gestiona
+#    Terraform ni Git):
+#    - un Secret de Kubernetes con las credenciales de RDS que usa MLflow
+#    - mapear GitLabCI_OIDC_Role en el ConfigMap aws-auth del cluster para
+#      que CI pueda correr kubectl
+kubectl create namespace dlinear-production
+kubectl create secret generic mlflow-db-credentials \
+  --namespace dlinear-production \
+  --from-literal=username=<mismo valor que var.db_username> \
+  --from-literal=password=<mismo valor que var.db_password>
+
+# 3. Desplegar la aplicación
+make deploy   # kubectl apply -k kubernetes/overlays/production
+```
+
+A partir de ahí, cada push a `main` corre el pipeline de CI: lint/test →
+build & push de la imagen a ECR → `kubectl apply -k` con el nuevo tag,
+usando el transformer `images:` de Kustomize para reescribir el tag de
+forma estructural en vez de un `sed` o un `kubectl set image`. Entrenar en
+CI es un job manual aparte -- necesita acceso de red al Service interno de
+MLflow, algo que un runner compartido de GitLab.com no tiene por defecto;
+`make train` corre el mismo pipeline en local contra el MLflow de
+docker-compose para la iteración del día a día.
+
+## Tests y calidad de código
+
+```bash
+make lint          # ruff check (api/ + core_ml/)
+make format        # ruff check --fix + ruff format
+make test           # pytest, ambos subproyectos
+make type-check     # mypy
+make ci             # lo mismo que corre CI: format-check + lint + test
+```
+
+Los tests son unitarios, con mocks y el `TestClient` de FastAPI -- no
+necesitan Docker, AWS real, ni un servidor MLflow real para correr. `make
+hooks` instala un hook de pre-commit que corre las mismas validaciones de
+formato, lint, tipos y tests antes de cada commit
+(`.pre-commit-config.yaml`), para que los problemas aparezcan en local
+antes de llegar a CI.
 
 ## Licencia
 
-Este proyecto está licenciado bajo la Licencia MIT — ver [LICENSE](LICENSE) para más detalles.
+[MIT](LICENSE)

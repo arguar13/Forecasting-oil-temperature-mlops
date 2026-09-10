@@ -4,10 +4,11 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.monitoring.reference_profile import (
+from src.monitoring.drift_check import (
     SENSOR_COLUMNS,
     ReferenceProfile,
     build_feature_baselines,
+    check_batch_for_drift,
 )
 
 
@@ -60,12 +61,32 @@ def test_reference_profile_round_trips_through_json(tmp_path) -> None:
         assert restored.features[column].std == pytest.approx(profile.features[column].std)
 
 
-def test_cusum_baselines_matches_the_shape_multifeaturecusum_expects() -> None:
-    profile = build_feature_baselines(_raw_train_df())
+def test_check_batch_for_drift_reports_ok_when_batch_matches_reference() -> None:
+    reference = build_feature_baselines(_raw_train_df())
+    matching_batch = _raw_train_df(n_rows=50)
 
-    baselines = profile.cusum_baselines()
+    report = check_batch_for_drift(matching_batch, reference)
 
-    assert set(baselines.keys()) == set(SENSOR_COLUMNS)
-    mean, std = baselines["OT"]
-    assert mean == pytest.approx(profile.features["OT"].mean)
-    assert std == pytest.approx(profile.features["OT"].std)
+    assert report.status == "ok"
+    assert report.drifted_features == []
+
+
+def test_check_batch_for_drift_flags_a_shifted_feature() -> None:
+    reference = build_feature_baselines(_raw_train_df())
+    shifted_batch = _raw_train_df(n_rows=50)
+    shifted_batch["OT"] = shifted_batch["OT"] + 100.0  # far outside the reference distribution
+
+    report = check_batch_for_drift(shifted_batch, reference)
+
+    assert report.status == "drift"
+    assert "OT" in report.drifted_features
+    assert report.per_feature["OT"].drifted is True
+
+
+def test_check_batch_for_drift_ignores_columns_missing_from_the_batch() -> None:
+    reference = build_feature_baselines(_raw_train_df())
+    partial_batch = _raw_train_df(n_rows=50).drop(columns=["OT"])
+
+    report = check_batch_for_drift(partial_batch, reference)
+
+    assert "OT" not in report.per_feature

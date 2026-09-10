@@ -1,9 +1,8 @@
 # Remoto de producción: mismo bucket determinístico que crea Terraform
 # (terraform/s3.tf::model_artifacts_bucket_name = "${project_name}-model-
 # artifacts-${account_id}"), bajo el prefijo dvc-store/. El Account ID no
-# se conoce hasta el primer `terraform apply` (Fase L de la guía de
-# ejecución) -- se reemplaza UNA vez por entorno, igual que
-# 040175285118 en kubernetes/overlays/production/.
+# se conoce hasta el primer `terraform apply` -- se reemplaza UNA vez por
+# entorno, igual que 040175285118 en kubernetes/overlays/production/.
 #
 # Para desarrollo local contra LocalStack (Docker Compose), no se toca este
 # archivo: se usa `.dvc/config.local` (ver config.local.example), que DVC

@@ -1,70 +1,38 @@
 # .gitlab-ci.yml
 #
-# Variables de proyecto/grupo requeridas en GitLab (Settings > CI/CD > Variables),
-# no definidas aquí por diseño: AWS_ACCOUNT_ID.
+# Pipeline simple, 4 etapas: valida -> construye y publica la imagen ->
+# despliega. Entrenar es un job manual aparte, no corre en cada push.
 #
-# Runners: TODOS los jobs de este pipeline corren en runners self-hosted --
-# cero minutos compartidos de GitLab.com se consumen jamás. Dos runners,
-# dos tags, cada uno por una razón técnica distinta (nunca por preferencia):
-#   - `local-hardware`: contenedor Docker en el hardware del propio
-#     desarrollador (ver `make runner-register` / `make runner-up` en el
-#     Makefile). Ejecuta todo lo que NO necesita resolver DNS interno del
-#     cluster: validate/quality/plan/apply/build-push/deploy.
-#   - `in-vpc`: pod dentro del cluster EKS (kubernetes/gitlab-runner/).
-#     Ejecuta exclusivamente train_model/quality_gate, que necesitan
-#     alcanzar el Service ClusterIP interno de MLflow -- inalcanzable desde
-#     cualquier máquina fuera de la VPC, incluida la del desarrollador.
-# La autenticación contra AWS (.aws-auth / .aws-auth-terraform, más abajo)
-# sigue siendo OIDC de corta duración en ambos runners -- mover un job de
-# runner nunca implica bajar a credenciales estáticas de larga duración.
+# Variable de proyecto/grupo requerida en GitLab (Settings > CI/CD > Variables):
+#   AWS_ACCOUNT_ID
+#
+# Runners: sin `tags:` -- corre en cualquier runner disponible del
+# proyecto/grupo, compartido o propio.
+
 variables:
   AWS_REGION: "us-east-1"
   ECR_REPOSITORY: "dlinear-forecast-api"
-  TF_ROOT: "terraform"
+  EKS_CLUSTER_NAME: "dlinear-forecast-cluster-eks"
   PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
-  # poetry NO respeta PIP_CACHE_DIR -- tiene su propio cache de paquetes,
-  # separado del de pip (por defecto en el $HOME del contenedor, efímero).
-  # Sin esto, "poetry install" (python:quality::make install) re-descarga
-  # ~100 paquetes -- torch incluido -- en cada corrida del pipeline, aunque
-  # el "cache:" de abajo esté declarado.
   POETRY_CACHE_DIR: "$CI_PROJECT_DIR/.cache/poetry"
-  # terraform:fmt/plan/apply corren en 3 jobs (=3 contenedores) distintos,
-  # cada uno con su propio "terraform init" -- sin esto, cada uno vuelve a
-  # descargar los ~5 providers (aws, kubernetes, tls, cloudinit, time) desde
-  # registry.terraform.io en cada corrida del pipeline.
-  TF_PLUGIN_CACHE_DIR: "$CI_PROJECT_DIR/.cache/terraform-plugins"
   # MLflow (kubernetes/base/mlflow.yaml) es un Service ClusterIP -- solo
-  # resoluble DENTRO del cluster. Valor fijo (no una variable de proyecto)
-  # porque train_model y quality_gate corren en el runner self-hosted
-  # dentro de la VPC (ver kubernetes/gitlab-runner/, tag `in-vpc`), donde
-  # este nombre DNS interno siempre resuelve igual.
+  # resoluble DENTRO del cluster. Ver la nota en el job "train" de más abajo.
   MLFLOW_TRACKING_URI: "http://mlflow.dlinear-production.svc.cluster.local:5000"
 
 stages:
-  - validate
-  - quality
-  - plan
-  - apply
-  - train
-  - quality-gate
-  - build-push
+  - lint_test
+  - build_push
   - deploy
+  - train
 
-# Configuración base para autenticación OIDC en AWS -- rol de aplicación
-# (dlinear_ci_role en terraform/iam.tf), acotado a ECR push/pull + S3 del
-# bucket de artefactos. Lo usan los jobs que construyen/entrenan/publican
-# la app: train_model, docker:build-push, docker:build-push-mlflow.
+# Autenticación OIDC contra AWS -- credenciales temporales vía
+# GitLabCI_OIDC_Role (ver terraform/iam.tf), sin guardar un access key de
+# larga duración como variable de CI.
 .aws-auth:
   id_tokens:
     GITLAB_OIDC_TOKEN:
       aud: sts.amazonaws.com
   before_script:
-    # Ninguna de las imágenes base que usan .aws-auth/.aws-auth-terraform
-    # (docker:24.0.5, python:3.10, hashicorp/terraform:1.15.9) trae AWS CLI
-    # preinstalado -- sin esto, el "aws sts assume-role-with-web-identity"
-    # de abajo falla con "aws: not found" antes de que cualquier `apk add`
-    # propio del job (ej. docker:build-push) llegue a correr, porque
-    # before_script siempre se ejecuta antes que script.
     - |
       if ! command -v aws >/dev/null 2>&1; then
         if command -v apk >/dev/null 2>&1; then
@@ -73,10 +41,6 @@ stages:
           apt-get update -qq && apt-get install -y -qq awscli >/dev/null
         fi
       fi
-    # STS=(...) es sintaxis de array de bash -- hashicorp/terraform:1.15.9 y
-    # docker:24.0.5 no traen bash (solo /bin/sh, dash/ash), donde falla con
-    # "syntax error: unexpected (". awk sobre la salida --output text es
-    # POSIX y funciona igual en bash, dash o ash.
     - >
       STS_OUTPUT=$(aws sts assume-role-with-web-identity
       --role-arn arn:aws:iam::${AWS_ACCOUNT_ID}:role/GitLabCI_OIDC_Role
@@ -89,449 +53,97 @@ stages:
     - export AWS_SECRET_ACCESS_KEY=$(echo "$STS_OUTPUT" | awk '{print $2}')
     - export AWS_SESSION_TOKEN=$(echo "$STS_OUTPUT" | awk '{print $3}')
 
-# Rol separado (TerraformCI_OIDC_Role en terraform/iam.tf::terraform_ci_role)
-# con PowerUserAccess + permisos de IAM acotados -- terraform:plan/apply
-# necesitan aprovisionar VPC/EKS/RDS/S3/ECR/IAM, muy por encima de lo que
-# GitLabCI_OIDC_Role otorga a propósito (evita que un pipeline de
-# build/train comprometido escale a permisos de administración de infra).
-.aws-auth-terraform:
-  id_tokens:
-    GITLAB_OIDC_TOKEN:
-      aud: sts.amazonaws.com
-  before_script:
-    - |
-      if ! command -v aws >/dev/null 2>&1; then
-        if command -v apk >/dev/null 2>&1; then
-          apk add --no-cache aws-cli >/dev/null
-        elif command -v apt-get >/dev/null 2>&1; then
-          apt-get update -qq && apt-get install -y -qq awscli >/dev/null
-        fi
-      fi
-    - >
-      STS_OUTPUT=$(aws sts assume-role-with-web-identity
-      --role-arn arn:aws:iam::${AWS_ACCOUNT_ID}:role/TerraformCI_OIDC_Role
-      --role-session-name "GitLabRunner-${CI_PROJECT_ID}-${CI_PIPELINE_ID}"
-      --web-identity-token ${GITLAB_OIDC_TOKEN}
-      --duration-seconds 3600
-      --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]'
-      --output text)
-    - export AWS_ACCESS_KEY_ID=$(echo "$STS_OUTPUT" | awk '{print $1}')
-    - export AWS_SECRET_ACCESS_KEY=$(echo "$STS_OUTPUT" | awk '{print $2}')
-    - export AWS_SESSION_TOKEN=$(echo "$STS_OUTPUT" | awk '{print $3}')
-
 # ========================
-# Terraform IaC Pipeline
+# Lint + tests unitarios (api/ y core_ml/) -- el mismo `make lint`/`make test`
+# que corre en local antes de hacer push.
 # ========================
-# entrypoint: [""] en los 3 jobs de abajo: la imagen oficial hashicorp/terraform
-# tiene ENTRYPOINT ["terraform"], así que sin esto cada línea de `script`
-# se ejecuta como "terraform <línea>" en vez de por una shell -- el job
-# fallaba con 'Terraform has no command named "sh"'.
-terraform:fmt:
-  stage: validate
-  tags: ["local-hardware"]
-  image:
-    name: hashicorp/terraform:1.15.9
-    entrypoint: [""]
-  script:
-    - cd $TF_ROOT
-    - terraform fmt -check
-  # AUTO_RETRAIN pipelines (mitigation.py's GitLab Pipeline Trigger call,
-  # ver core_ml/src/monitoring/mitigation.py) corren solo train_model +
-  # quality_gate -- ni terraform ni la imagen de la API cambiaron, así
-  # que el resto del pipeline normal no tiene nada que aportar.
-  rules:
-    - if: '$AUTO_RETRAIN != "true"'
-
-# ========================
-# Validación Shift-Left (Fase 1: misma interfaz que en local)
-# ========================
-# El Makefile es la única interfaz de ejecución: lo que corre aquí es
-# exactamente `make ci`, lo mismo que un desarrollador ejecuta localmente
-# antes de hacer commit (vía pre-commit) o de abrir un MR.
-python:quality:
-  stage: quality
-  tags: ["local-hardware"]
+lint_test:
+  stage: lint_test
   image: python:3.10
-  variables:
-    # Igual que POETRY_CACHE_DIR: pre-commit tiene su propio cache de
-    # entornos de hooks (~/.cache/pre-commit por defecto, efímero), y
-    # "make ci" corre "pre-commit run yamllint/detect-secrets".
-    PRE_COMMIT_HOME: "$CI_PROJECT_DIR/.cache/pre-commit"
   cache:
     key: "poetry-$CI_COMMIT_REF_SLUG"
     paths:
       - .cache/pip
       - .cache/poetry
-      - .cache/pre-commit
   before_script:
-    - apt-get update && apt-get install -y --no-install-recommends make git
-    - pip install --no-cache-dir poetry==1.8.3 pre-commit
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends make
+    - pip install --no-cache-dir poetry==1.8.3
   script:
     - make install
-    - make ci
+    - make lint
+    - make test
   rules:
-    - if: '$AUTO_RETRAIN != "true"'
+    - if: $CI_COMMIT_BRANCH
 
-security:trivy:
-  stage: quality
-  tags: ["local-hardware"]
+# ========================
+# Build & push de la imagen de la API a ECR (sirve tanto el endpoint HTTP
+# como el CronJob de batch inference).
+# ========================
+build_push:
+  stage: build_push
+  extends: .aws-auth
   image: docker:24.0.5
   services:
     - docker:24.0.5-dind
-  # Sin esto, el dind por defecto levanta TLS en el puerto 2376 (certs en
-  # /certs) y el cliente `docker` de este job -- que no monta esos certs --
-  # intenta el socket unix por defecto, que no existe en esta imagen:
-  # "Cannot connect to the Docker daemon". Detectado corriendo este job
-  # con `gitlab-ci-local --privileged` antes de hacer push (ver
-  # integration_tests, que ya usa este mismo patrón).
   variables:
     DOCKER_HOST: tcp://docker:2375
     DOCKER_TLS_CERTDIR: ""
-  # .cache/trivy vive en el workspace del JOB (lo que "cache:" persiste
-  # entre corridas) y se monta dentro del contenedor efímero de trivy -- sin
-  # esto, la base de datos de vulnerabilidades (~110MB) se re-descarga en
-  # cada pipeline en vez de solo actualizarse incrementalmente.
-  cache:
-    key: "trivy-db"
-    paths:
-      - .cache/trivy
   script:
-    # El servicio docker:24.0.5-dind a veces todavía no acepta conexiones
-    # cuando arranca este script (GitLab espera a que el puerto esté
-    # escuchando, no a que el daemon esté listo para servir requests) --
-    # "Cannot connect to the Docker daemon at tcp://docker:2375" instantáneo,
-    # verificado en un run real (dos veces seguidas). Reintenta la conexión
-    # en vez de asumir que el daemon ya está listo.
+    - apk add --no-cache aws-cli
+    # El servicio dind a veces todavía no acepta conexiones cuando arranca
+    # este script -- reintenta en vez de asumir que ya está listo.
     - i=0; until docker info >/dev/null 2>&1 || [ $i -ge 30 ]; do i=$((i+1)); sleep 2; done
-    # Versión pineada, no ":latest" -- igual que el resto de las imágenes de
-    # este pipeline (python:3.10, docker:24.0.5, hashicorp/terraform:1.15.9):
-    # una release nueva de trivy puede cambiar de CLI o marcar CVEs nuevas de
-    # un día para el otro, rompiendo el pipeline sin que el código haya
-    # cambiado. Mantener sincronizado con Makefile::trivy (mismo pin).
-    - docker run --rm -v "$CI_PROJECT_DIR":/repo -v "$CI_PROJECT_DIR/.cache/trivy":/root/.cache/trivy aquasec/trivy:0.74.0 fs
-        --exit-code 1 --severity HIGH,CRITICAL --ignorefile /repo/.trivyignore
-        --skip-dirs "**/.terraform,**/mlruns,**/mlartifacts,**/.claude"
-        --skip-files "**/*.tfstate,**/*.tfstate.*" /repo
+    - aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
+    - ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+    - docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$CI_COMMIT_SHA -f Dockerfile .
+    - docker push $ECR_REGISTRY/$ECR_REPOSITORY:$CI_COMMIT_SHA
   rules:
-    - if: '$AUTO_RETRAIN != "true"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
 
 # ========================
-# Fase 3: Testcontainers (Postgres/Kafka/LocalStack efímeros + docker-compose.yml)
+# Deploy directo vía kubectl: este job actualiza el tag de imagen con
+# kustomize y aplica los manifiestos al cluster. alpine/k8s ya trae
+# kubectl + aws-cli + kustomize preinstalados.
 # ========================
-# Requiere un runner con soporte Docker-in-Docker en modo privileged (mismo
-# requisito que docker:build-push/security:trivy). Si el runner compartido no
-# lo soporta, `allow_failure` evita bloquear el resto del pipeline -- pero el
-# resultado debe revisarse igual: es la prueba de que Postgres, LocalStack,
-# Kafka, MLflow y la API se integran correctamente antes de tocar AWS real.
-integration_tests:
-  stage: quality
-  tags: ["local-hardware"]
-  # NO docker:24.0.5 (Alpine/musl): el lockfile de core_ml instala torch, y
-  # su build de Linux en PyPI trae dependencias CUDA (cuda-bindings,
-  # nvidia-*) sin wheels musllinux -- "ERROR: No matching distribution
-  # found for cuda-bindings==... (from versions: none)" instalando sobre
-  # Python de Alpine. python:3.10 (Debian/glibc) sí resuelve esos wheels;
-  # el cliente de Docker se instala vía apt para seguir hablándole al
-  # servicio docker:24.0.5-dind de abajo.
-  image: python:3.10
-  services:
-    - docker:24.0.5-dind
-  variables:
-    DOCKER_HOST: tcp://docker:2375
-    DOCKER_TLS_CERTDIR: ""
-  allow_failure: true
-  rules:
-    - if: '$AUTO_RETRAIN != "true"'
-  # Mismas dependencias que train_model/quality_gate (core_ml completo, con
-  # dev group) -- comparten cache key para no descargar 3 veces los mismos
-  # ~2GB de wheels (torch, cuda) entre estos 3 jobs.
-  cache:
-    key: "pip-core-ml-$CI_COMMIT_REF_SLUG"
-    paths:
-      - .cache/pip
-  before_script:
-    # "docker.io" (repo de Debian) instala el DAEMON (dockerd) pero no el
-    # cliente -- Debian lo separó en el paquete "docker-cli", que a su vez
-    # no trae el plugin de "docker compose" (v2) que usa testcontainers
-    # (ver testcontainers.compose.DockerCompose::compose_command_property,
-    # invoca ["docker", "compose", ...], no el binario standalone
-    # "docker-compose" v1). El repo oficial de Docker sí empaqueta cliente +
-    # plugin juntos y consistentes entre sí -- se agrega igual que documenta
-    # docs.docker.com/engine/install/debian/.
-    - install -m 0755 -d /etc/apt/keyrings
-    - curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
-    - chmod a+r /etc/apt/keyrings/docker.asc
-    - echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian $(. /etc/os-release && echo $VERSION_CODENAME) stable" > /etc/apt/sources.list.d/docker.list
-    # DEBIAN_FRONTEND=noninteractive: sin esto, debconf escribe ruido a
-    # stderr ("unable to initialize frontend") en una imagen sin tty --
-    # inofensivo por sí solo, pero ese stderr hacía que gitlab-ci-local (con
-    # reintentos en varias líneas) diera el job por terminado antes de
-    # llegar al resto del script.
-    - DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends docker-ce-cli docker-compose-plugin
-    # "poetry install" del lockfile de core_ml muere de forma silenciosa e
-    # intermitente en este runner (ver Makefile::install-core-ml-ci) --
-    # "poetry export" + pip evita la ruta de código rota sin perder el
-    # pineado exacto del lockfile.
-    - pip install --no-cache-dir poetry==1.8.3 poetry-plugin-export==1.8.0
-    - cd core_ml && poetry export -f requirements.txt --without-hashes -o /tmp/requirements.txt --with dev
-    # --timeout 120 (default de pip: 15s): "Read timed out" real bajando
-    # torch bajo contención de este host (verificado en un job real de
-    # docker:build-push -- mismo riesgo aquí, mismas dependencias).
-    - pip install --no-cache-dir --timeout 120 -r /tmp/requirements.txt
+deploy:
+  stage: deploy
+  extends: .aws-auth
+  image: alpine/k8s:1.30.13
+  needs: ["build_push"]
   script:
-    # Ya estamos en core_ml/ (el "cd core_ml" de "poetry export" en
-    # before_script persiste dentro del mismo contenedor del job).
-    - pytest -m integration --no-cov tests/integration
-
-terraform:plan:
-  stage: plan
-  tags: ["local-hardware"]
-  extends: .aws-auth-terraform
-  image:
-    name: hashicorp/terraform:1.15.9
-    entrypoint: [""]
-  cache:
-    key: "terraform-plugins"
-    paths:
-      - .cache/terraform-plugins
-  script:
-    - mkdir -p "$TF_PLUGIN_CACHE_DIR"
-    - cd $TF_ROOT
-    - terraform init
-    - terraform plan -out=tfplan
-  # Sin esto, "tfplan" nunca llega al job de "apply" (stage distinto,
-  # workspace nuevo) y "terraform apply tfplan" falla con "no such file".
-  artifacts:
-    paths:
-      - $TF_ROOT/tfplan
-    expire_in: 1 hour
-  # Sin esto, plan/apply corrían en TODOS los pushes a main, incluso los
-  # que solo tocan código de la app -- terraform/ no cambió, pero igual
-  # se pagaban ~5 min de plan+apply (que además hoy hacen falta reintentos
-  # por demoras de propagación de IAM, ver terraform:apply). "changes:"
-  # es casi gratis (un diff de nombres de archivo contra el commit
-  # anterior, no clona ni ejecuta nada de más).
+    - aws eks update-kubeconfig --name $EKS_CLUSTER_NAME --region $AWS_REGION
+    - cd kubernetes/overlays/production
+    - kustomize edit set image dlinear-api=${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/$ECR_REPOSITORY:$CI_COMMIT_SHA
+    - kubectl apply -k .
   rules:
-    - if: '$AUTO_RETRAIN != "true"'
-      changes:
-        - terraform/**/*
-
-terraform:apply:
-  stage: apply
-  tags: ["local-hardware"]
-  extends: .aws-auth-terraform
-  image:
-    name: hashicorp/terraform:1.15.9
-    entrypoint: [""]
-  cache:
-    key: "terraform-plugins"
-    paths:
-      - .cache/terraform-plugins
-  script:
-    - mkdir -p "$TF_PLUGIN_CACHE_DIR"
-    - cd $TF_ROOT
-    - terraform init
-    - terraform apply -auto-approve tfplan
-  rules:
-    - if: '$CI_COMMIT_BRANCH == "main" && $AUTO_RETRAIN != "true"'
-      changes:
-        - terraform/**/*
-  # NO retry: se probó "retry: 2" para el caso de propagación de IAM (un
-  # permiso nuevo tarda unos segundos en propagarse -- ver el historial de
-  # terraform_ci_iam_scoped en iam.tf) y resultó contraproducente para una
-  # falla distinta y más frecuente en este runner: el job a veces reporta
-  # "failed" (con el log cortado a mitad de camino) después de que el
-  # apply YA modificó el estado real con éxito -- verificado comparando
-  # contra la infraestructura real (`terraform plan` -> "No changes")
-  # tras uno de estos "fallos". Reintentar en ese caso usa el MISMO tfplan
-  # (ya desactualizado porque el intento anterior sí aplicó cambios) y
-  # falla garantizado con "Saved plan is stale". Un push nuevo (que de
-  # todos modos genera un terraform:plan fresco) es la recuperación
-  # correcta, no un retry ciego del mismo job.
+    - if: '$CI_COMMIT_BRANCH == "main"'
 
 # ========================
-# ML Pipeline (Core ML)
-# ========================
-# Cada corrida queda atada de forma inequívoca a:
-#   Git Commit Hash + DVC Data Hash + Hyperparameters + MLflow Run ID + Container Image Tag
-# (ver core_ml/src/mlflow_utils.py::build_reproducibility_tags). MLFLOW_TRACKING_URI
-# apunta al Service ClusterIP interno de MLflow (kubernetes/base/mlflow.yaml) --
-# por eso este job corre en el runner self-hosted dentro de la VPC
-# (kubernetes/gitlab-runner/), el único que puede resolver ese DNS interno.
+# Entrenamiento manual: entrena, evalúa el quality gate (compara contra la
+# versión actual de "production" en el Model Registry) y promueve si el
+# candidato es mejor. No corre automáticamente en cada push -- se dispara a
+# mano desde la UI de GitLab cuando hay datos nuevos.
 #
-# train_model y quality_gate son los ÚNICOS dos jobs de todo este pipeline
-# que SÍ corren en un pipeline AUTO_RETRAIN=true (disparado por
-# core_ml/src/monitoring/mitigation.py vía la API de Pipeline Trigger de
-# GitLab, junto con TRIGGER_SOURCE/TRIGGER_REASON/TRIGGER_MODEL_VERSION) --
-# su regla no necesita el `&& $AUTO_RETRAIN != "true"` que el resto de este
-# archivo sí tiene, porque un reentrenamiento automático es exactamente
-# "vuelve a correr estos dos jobs", nada más: ni terraform, ni las imágenes
-# Docker, ni el despliegue tienen nada que aportar a esa corrida. Si
-# quality_gate rechaza el candidato, el pipeline queda en rojo y
-# production nunca se toca -- ver ese script para la comparación
-# canary/shadow, y mitigation.py para el cooldown/techo que acota cuántas
-# veces esto puede dispararse solo.
-train_model:
+# Nota/limitación conocida: MLFLOW_TRACKING_URI apunta al Service interno de
+# MLflow, solo resoluble DENTRO de la VPC del cluster. Los runners
+# compartidos de GitLab.com no tienen esa conectividad -- para correr este
+# job tal cual necesitás un runner con acceso a la VPC (o exponer MLflow en
+# un endpoint alcanzable). Para desarrollo y pruebas, `make train` corre el
+# mismo pipeline en local contra el MLflow de docker-compose.
+# ========================
+train:
   stage: train
   extends: .aws-auth
   image: python:3.10
-  tags: ["in-vpc"]
-  variables:
-    CONTAINER_IMAGE_TAG: "$CI_COMMIT_SHA"
-  script:
-    # "poetry install" del lockfile de core_ml muere de forma silenciosa e
-    # intermitente en este runner (self-hosted, mismo host que ve esta
-    # flakiness en local -- ver Makefile::install-core-ml-ci) -- "poetry
-    # export" + pip evita la ruta de código rota sin perder el pineado
-    # exacto del lockfile. Tampoco depende de "make" (python:3.10 no lo
-    # trae preinstalado).
-    # --only main, no --with dev: este job entrena, no corre tests --
-    # pytest/mypy/ruff/bandit/testcontainers (y sus propias dependencias
-    # transitivas) no hacen falta acá, solo alargan el install.
-    - pip install --no-cache-dir poetry==1.8.3 poetry-plugin-export==1.8.0
-    - cd core_ml && poetry export -f requirements.txt --without-hashes -o /tmp/requirements.txt --only main
-    # --timeout 120 (default de pip: 15s): "Read timed out" real bajando
-    # torch bajo contención de este host (verificado en un job real de
-    # docker:build-push -- mismo riesgo aquí, mismas dependencias).
-    - pip install --no-cache-dir --timeout 120 -r /tmp/requirements.txt
-    # DVC descarga el dataset versionado desde S3 (requiere credenciales de .aws-auth)
-    - dvc pull data/raw/ETTh1.csv.dvc
-    # FAIL FAST: valida el contrato de datos y genera los tensores de entrenamiento
-    - python -m src.data_processing --dataset raw
-    # Entrena, registra en MLflow (métricas, tags de reproducibilidad, modelo empaquetado)
-    - python -m src.train --dataset raw
-  rules:
-    - if: $CI_COMMIT_BRANCH == "main"
-
-quality_gate:
-  stage: quality-gate
-  image: python:3.10
-  needs: ["train_model"]
-  # También necesita alcanzar el MLflow interno (MlflowClient contra
-  # MLFLOW_TRACKING_URI) -- mismo runner self-hosted que train_model.
-  tags: ["in-vpc"]
-  script:
-    # --only main: mismo motivo que en train_model, este job tampoco corre tests.
-    - pip install --no-cache-dir poetry==1.8.3 poetry-plugin-export==1.8.0
-    - cd core_ml && poetry export -f requirements.txt --without-hashes -o /tmp/requirements.txt --only main
-    # --timeout 120 (default de pip: 15s): "Read timed out" real bajando
-    # torch bajo contención de este host (verificado en un job real de
-    # docker:build-push -- mismo riesgo aquí, mismas dependencias).
-    - pip install --no-cache-dir --timeout 120 -r /tmp/requirements.txt
-    # Bloquea el pipeline (build-push/deploy nunca corren) si el modelo recién
-    # entrenado no supera a la versión actualmente en producción. Ya estamos
-    # en core_ml/ (el "cd core_ml" de la línea de "poetry export" de arriba
-    # persiste dentro del mismo script de CI).
-    - python -m src.quality_gate
-  rules:
-    - if: $CI_COMMIT_BRANCH == "main"
-
-# ========================
-# App CI/CD Pipeline (API)
-# ========================
-docker:build-push:
-  stage: build-push
-  tags: ["local-hardware"]
-  extends: .aws-auth
-  image: docker:24.0.5
-  services:
-    - docker:24.0.5-dind
-  # Ver el comentario equivalente en security:trivy -- sin esto, el cliente
-  # docker de este job no puede hablarle al dind por defecto (TLS en 2376).
-  variables:
-    DOCKER_HOST: tcp://docker:2375
-    DOCKER_TLS_CERTDIR: ""
-  script:
-    - apk add --no-cache aws-cli
-    # Ver el comentario equivalente en security:trivy -- el dind service a
-    # veces todavía no acepta conexiones cuando arranca el script.
-    - i=0; until docker info >/dev/null 2>&1 || [ $i -ge 30 ]; do i=$((i+1)); sleep 2; done
-    - aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
-    - ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
-    # Cache de capas entre corridas: el repo ECR es inmutable (no hay tag
-    # ":latest" flotante para usar como cache-from directo, ver nota abajo),
-    # así que se resuelve dinámicamente cuál fue el último tag (SHA) subido
-    # y se lo trae como fuente de cache -- evita reinstalar PyTorch/Poetry
-    # desde cero en cada pipeline cuando esas capas no cambiaron. Si todavía
-    # no hay ninguna imagen publicada (primer deploy), el pull/build siguen
-    # funcionando igual, solo sin cache.
-    - PREVIOUS_TAG=$(aws ecr describe-images --repository-name $ECR_REPOSITORY --region $AWS_REGION --query 'sort_by(imageDetails,& imagePushedAt)[-1].imageTags[0]' --output text 2>/dev/null || true)
-    - if [ -n "$PREVIOUS_TAG" ] && [ "$PREVIOUS_TAG" != "None" ]; then docker pull "$ECR_REGISTRY/$ECR_REPOSITORY:$PREVIOUS_TAG" || true; fi
-    # Construcción leyendo el Dockerfile de la raíz, el cual copia la carpeta api/
-    - docker build --cache-from "$ECR_REGISTRY/$ECR_REPOSITORY:$PREVIOUS_TAG" -t $ECR_REGISTRY/$ECR_REPOSITORY:$CI_COMMIT_SHA -f Dockerfile .
-    - docker push $ECR_REGISTRY/$ECR_REPOSITORY:$CI_COMMIT_SHA
-    # Sin tag `:latest`: el repo ECR es IMMUTABLE (terraform/ecr.tf) y cada
-    # despliegue queda atado a un SHA exacto, trazable y reproducible --
-    # un tag flotante reintroduciría justo la ambigüedad que la tupla de
-    # reproducibilidad de la Fase 2 existe para evitar.
-  rules:
-    - if: '$CI_COMMIT_BRANCH == "main" && $AUTO_RETRAIN != "true"'
-
-# Publica la imagen del MLflow Tracking Server que corre en producción
-# (kubernetes/base/mlflow.yaml), en su propio repositorio ECR
-# (terraform/ecr.tf::dlinear_mlflow) -- mismo mlflow.Dockerfile que ya usa
-# docker-compose.yml en local, ahora también publicado para EKS.
-docker:build-push-mlflow:
-  stage: build-push
-  tags: ["local-hardware"]
-  extends: .aws-auth
-  image: docker:24.0.5
-  services:
-    - docker:24.0.5-dind
-  # Ver el comentario equivalente en security:trivy -- sin esto, el cliente
-  # docker de este job no puede hablarle al dind por defecto (TLS en 2376).
-  variables:
-    DOCKER_HOST: tcp://docker:2375
-    DOCKER_TLS_CERTDIR: ""
-  script:
-    - apk add --no-cache aws-cli
-    # Ver el comentario equivalente en security:trivy -- el dind service a
-    # veces todavía no acepta conexiones cuando arranca el script.
-    - i=0; until docker info >/dev/null 2>&1 || [ $i -ge 30 ]; do i=$((i+1)); sleep 2; done
-    - aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
-    - ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
-    # Ver el comentario equivalente en docker:build-push -- misma estrategia
-    # de cache contra un repo ECR inmutable.
-    - PREVIOUS_TAG=$(aws ecr describe-images --repository-name dlinear-mlflow-server --region $AWS_REGION --query 'sort_by(imageDetails,& imagePushedAt)[-1].imageTags[0]' --output text 2>/dev/null || true)
-    - if [ -n "$PREVIOUS_TAG" ] && [ "$PREVIOUS_TAG" != "None" ]; then docker pull "$ECR_REGISTRY/dlinear-mlflow-server:$PREVIOUS_TAG" || true; fi
-    - docker build --cache-from "$ECR_REGISTRY/dlinear-mlflow-server:$PREVIOUS_TAG" -t $ECR_REGISTRY/dlinear-mlflow-server:$CI_COMMIT_SHA -f mlflow.Dockerfile .
-    - docker push $ECR_REGISTRY/dlinear-mlflow-server:$CI_COMMIT_SHA
-  rules:
-    - if: '$CI_COMMIT_BRANCH == "main" && $AUTO_RETRAIN != "true"'
-
-# ========================
-# GitOps: CI nunca toca el cluster. Solo declara el nuevo estado deseado en
-# Git (el tag de imagen, editado de forma estructural con `kustomize edit
-# set image` -- nunca `sed`, nunca `kubectl set image`) y lo comitea a
-# `main`. ArgoCD (ver gitops/argocd/) reconcilia el cluster desde ahí.
-# ========================
-kubernetes:deploy:
-  stage: deploy
-  tags: ["local-hardware"]
-  image: python:3.10
-  needs: ["docker:build-push", "docker:build-push-mlflow"]
   before_script:
-    - apt-get update && apt-get install -y --no-install-recommends git curl
-    # Binario pineado (misma versión que kustomize local, ver
-    # Prerrequisitos), no el script "install_kustomize.sh@master" -- una
-    # rama sin pinear puede cambiar de contenido en cualquier momento
-    # (riesgo de cadena de suministro) y además siempre trae la última
-    # versión, no una determinista.
-    - curl -sL "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv5.7.1/kustomize_v5.7.1_linux_amd64.tar.gz" | tar xz -C /usr/local/bin
+    - !reference [.aws-auth, before_script]
+    - pip install --no-cache-dir poetry==1.8.3
   script:
-    - cd kubernetes/overlays/production
-    - kustomize edit set image dlinear-api=${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/$ECR_REPOSITORY:$CI_COMMIT_SHA
-    - kustomize edit set image mlflow-server=${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/dlinear-mlflow-server:$CI_COMMIT_SHA
-    - cd "$CI_PROJECT_DIR"
-    - git config user.name "gitlab-ci"
-    - git config user.email "gitlab-ci@${CI_SERVER_HOST}"
-    - git add kubernetes/overlays/production/kustomization.yaml
-    # `[skip ci]`: este commit no debe disparar un pipeline nuevo -- de lo
-    # contrario, cada deploy dispararía otro pipeline que dispara otro
-    # deploy, un loop infinito (ver Regla Absoluta Final).
-    - 'git commit -m "deploy: dlinear-api@${CI_COMMIT_SHA} + mlflow-server@${CI_COMMIT_SHA} [skip ci]" || echo "Sin cambios que comitear"'
-    # Requiere habilitar "Allow this project's job tokens to push to this
-    # repository" en Settings > CI/CD > Token Access.
-    - git push "https://gitlab-ci-token:${CI_JOB_TOKEN}@${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git" HEAD:${CI_COMMIT_BRANCH}
+    - cd core_ml && poetry install --sync --no-interaction
+    - poetry run dvc pull data/raw/ETTh1.csv.dvc
+    - poetry run python -m src.data_processing --dataset raw
+    - poetry run python -m src.train --dataset raw
+    - poetry run python -m src.quality_gate
+  when: manual
   rules:
-    - if: '$CI_COMMIT_BRANCH == "main" && $AUTO_RETRAIN != "true"'
+    - if: '$CI_COMMIT_BRANCH == "main"'

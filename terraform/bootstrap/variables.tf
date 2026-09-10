@@ -15,12 +15,6 @@ variable "lock_table_name" {
   default     = "terraform-state-locks"
 }
 
-variable "db_secret_name" {
-  description = "Nombre del secreto de Secrets Manager con la password de RDS (debe coincidir con ../rds.tf)"
-  type        = string
-  default     = "dlinear-mlops/db-password"
-}
-
 variable "db_username" {
   description = "Usuario administrador de RDS (debe coincidir con db_username en ../variables.tf)"
   type        = string
@@ -28,7 +22,7 @@ variable "db_username" {
 }
 
 variable "operator_user_name" {
-  description = "Nombre del usuario IAM operador que ejecuta el primer terraform apply (Fase L/N de la guía) y las operaciones manuales posteriores"
+  description = "Nombre del usuario IAM operador que ejecuta el primer terraform apply y las operaciones manuales posteriores"
   type        = string
   default     = "dlinear-mlops-admin"
 }

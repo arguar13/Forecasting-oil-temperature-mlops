@@ -14,7 +14,7 @@ from torch.utils.data import DataLoader, TensorDataset
 from src.logging_config import configure_logging, get_logger
 from src.mlflow_utils import build_reproducibility_tags, log_and_register_model
 from src.model_architecture import DLinear
-from src.monitoring.reference_profile import ReferenceProfile
+from src.monitoring.drift_check import ReferenceProfile
 
 configure_logging()
 logger = get_logger(__name__)
@@ -342,11 +342,9 @@ if __name__ == "__main__":
         # Complete the reference profile data_processing.py started (raw
         # per-sensor mean/std, no performance figures yet - it trained no
         # model) with the held-out metrics just computed, and log it as an
-        # artifact of THIS run. core_ml/src/monitoring/stream_consumer.py
-        # downloads it via the served model's run_id the same way
-        # 610-hotel-booking-mlops's drift_monitor.py does - immutable,
-        # precisely identified, and requiring no DVC/bucket access from a
-        # streaming pod.
+        # artifact of THIS run. batch_inference.py downloads it via the
+        # served model's run_id and uses it for the post-inference drift
+        # check (core_ml/src/monitoring/drift_check.py).
         profile_path = os.path.join(args.artifact_dir, "reference_profile.json")
         reference_profile = ReferenceProfile.read(profile_path)
         reference_profile.baseline_test_mse = test_metrics["test_mse"]

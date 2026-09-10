@@ -20,7 +20,7 @@ spec:
           labels:
             app: dlinear-batch
         spec:
-          serviceAccountName: dlinear-sa  # Aprovecha el mismo IAM Role (IRSA) para acceder a S3
+          serviceAccountName: dlinear-sa  # El acceso a S3 lo da el rol de IAM del node group (ver terraform/eks.tf)
           restartPolicy: OnFailure
           containers:
           - name: dlinear-batch-container

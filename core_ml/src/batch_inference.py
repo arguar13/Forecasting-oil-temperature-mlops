@@ -6,6 +6,7 @@ import mlflow
 import numpy as np
 import pandas as pd
 from mlflow.pyfunc import PyFuncModel, load_model
+from mlflow.tracking import MlflowClient
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from src.data_contracts import (
@@ -14,8 +15,8 @@ from src.data_contracts import (
     DataContractError,
     validate_feature_dataframe,
 )
-from src.events import publish_batch_inference_completed
 from src.logging_config import configure_logging, get_logger
+from src.monitoring.drift_check import ReferenceProfile, check_batch_for_drift, log_drift_report
 
 configure_logging()
 logger = get_logger(__name__)
@@ -24,12 +25,9 @@ DEFAULT_MODEL_NAME = "dlinear-ett-forecaster"
 DEFAULT_MODEL_ALIAS = "production"
 
 # Retry con backoff acotado (máx. 3 intentos): cubre blips transitorios de
-# red contra S3/MLflow sin reintentar para siempre. No lleva circuit
-# breaker -- a diferencia de la API (que corre indefinidamente y sí se
-# beneficia de "dejar de golpear" una dependencia caída), el CronJob es un
-# proceso nuevo en cada corrida, así que el propio `backoffLimit` de
-# Kubernetes (ver kubernetes/base/cronjob.yaml) ya acota los reintentos
-# entre corridas completas.
+# red contra S3/MLflow sin reintentar para siempre. El propio `backoffLimit`
+# de Kubernetes (ver kubernetes/base/cronjob.yaml) ya acota los reintentos
+# entre corridas completas del CronJob.
 _RESILIENT_RETRY = retry(
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, min=2, max=15),
@@ -37,15 +35,10 @@ _RESILIENT_RETRY = retry(
 )
 
 
-CLOUDWATCH_NAMESPACE = "DLinearBatchInference"
-CLOUDWATCH_HEARTBEAT_METRIC = "InferenceSuccess"
-
-
 class BatchInferenceService:
     def __init__(self):
         aws_endpoint = os.getenv("AWS_ENDPOINT_URL")
         self.s3_client = boto3.client("s3", endpoint_url=aws_endpoint)
-        self.cloudwatch_client = boto3.client("cloudwatch", endpoint_url=aws_endpoint)
         self.bucket = os.getenv("MODEL_BUCKET_NAME", "mlops-portafolio-proj3-models")
         self.input_key = os.getenv("BATCH_INPUT_KEY", "batch/input_data.csv")
         self.output_key = os.getenv("BATCH_OUTPUT_KEY", "batch/predictions_output.csv")
@@ -54,6 +47,7 @@ class BatchInferenceService:
         self.seq_len = 48
         self.batch_size = 512
         self.model: PyFuncModel | None = None
+        self.reference_profile: ReferenceProfile | None = None
 
     @_RESILIENT_RETRY
     def load_model(self):
@@ -65,7 +59,15 @@ class BatchInferenceService:
         model_uri = f"models:/{self.model_name}@{self.model_alias}"
         logger.info("model_load_started", model_uri=model_uri)
         self.model = load_model(model_uri)
-        logger.info("model_load_succeeded", model_uri=model_uri)
+
+        # También se descarga el perfil de referencia de esta misma versión
+        # (logueado por train.py) para el chequeo de drift al final del batch.
+        version = MlflowClient().get_model_version_by_alias(self.model_name, self.model_alias)
+        profile_path = mlflow.artifacts.download_artifacts(
+            run_id=version.run_id, artifact_path="monitoring/reference_profile.json"
+        )
+        self.reference_profile = ReferenceProfile.read(profile_path)
+        logger.info("model_load_succeeded", model_uri=model_uri, version=version.version)
 
     @_RESILIENT_RETRY
     def _download_input(self) -> pd.DataFrame:
@@ -77,32 +79,6 @@ class BatchInferenceService:
     def _upload_output(self, body: str) -> None:
         logger.info("batch_output_upload_started", bucket=self.bucket, key=self.output_key)
         self.s3_client.put_object(Bucket=self.bucket, Key=self.output_key, Body=body)
-
-    def _publish_heartbeat(self) -> None:
-        """Dead man's switch: kubernetes/base/cronjob.yaml corre este proceso
-        una vez al día y termina, así que "alertar cuando falla" no puede
-        depender de que el propio proceso que falló siga vivo lo suficiente
-        para reportarlo -- eso deja sin cubrir justo los modos de falla más
-        duros (OOMKilled, imagen que nunca arranca, backoffLimit agotado
-        antes de correr una sola vez). En vez de eso, cada corrida EXITOSA
-        publica este metric; el CloudWatch Alarm de terraform/alarms.tf se
-        dispara si no llega ninguno dentro de la ventana esperada -- una
-        ausencia de éxito, no una presencia de fallo, que cubre todo lo
-        anterior sin excepción.
-
-        Best-effort, igual que publish_batch_inference_completed (events.py):
-        un fallo al publicar el heartbeat no debe hacer fallar un batch que
-        sí terminó bien.
-        """
-        try:
-            self.cloudwatch_client.put_metric_data(
-                Namespace=CLOUDWATCH_NAMESPACE,
-                MetricData=[
-                    {"MetricName": CLOUDWATCH_HEARTBEAT_METRIC, "Value": 1.0, "Unit": "Count"}
-                ],
-            )
-        except Exception as exc:
-            logger.warning("heartbeat_publish_failed", error=str(exc))
 
     def process_batch(self):
         if self.model is None:
@@ -121,7 +97,7 @@ class BatchInferenceService:
         windows = np.stack([feature_values[i : i + self.seq_len] for i in range(n_windows)])
 
         logger.info("batch_scoring_started", n_windows=n_windows, batch_size=self.batch_size)
-        predictions = []
+        predictions: list[np.ndarray] = []
         for start in range(0, n_windows, self.batch_size):
             batch = windows[start : start + self.batch_size]
             preds = self.model.predict(batch)  # una sola pasada vectorizada por lote
@@ -144,15 +120,12 @@ class BatchInferenceService:
         self._upload_output(csv_buffer.getvalue())
         logger.info("batch_inference_completed", n_predictions=len(output_df))
 
-        # Evento de observabilidad (best-effort, no bloqueante -- ver events.py).
-        publish_batch_inference_completed(
-            bucket=self.bucket,
-            output_key=self.output_key,
-            n_predictions=len(output_df),
-            model_name=self.model_name,
-            model_alias=self.model_alias,
-        )
-        self._publish_heartbeat()
+        # Chequeo de drift simple sobre el batch recién inferido -- solo
+        # loguea el resultado, no dispara ninguna acción automática (ver
+        # core_ml/src/monitoring/drift_check.py).
+        if self.reference_profile is not None:
+            report = check_batch_for_drift(df, self.reference_profile)
+            log_drift_report(report)
 
 
 if __name__ == "__main__":
