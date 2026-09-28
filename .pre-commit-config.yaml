@@ -85,5 +85,5 @@ repos:
         # también caía en el `|| echo` y el hook salía con 0 -- nunca bloqueaba.
         entry: bash -c 'if command -v terraform >/dev/null 2>&1; then terraform -chdir=terraform fmt -check -recursive; else echo "terraform no instalado localmente, omitiendo"; fi'
         language: system
-        files: ^terraform/.*\.tf$
+        files: ^terraform/.*\.(tf|tftest\.hcl)$
         pass_filenames: false
