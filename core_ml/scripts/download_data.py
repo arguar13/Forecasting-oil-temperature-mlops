@@ -34,10 +34,14 @@ def download(url: str, target: Path, timeout: int = 60) -> None:
 
 
 def write_toy(raw: Path, toy: Path, n_rows: int = TOY_ROWS) -> None:
-    """Cabecera + las primeras `n_rows` filas horarias (orden cronológico)."""
+    """Cabecera + las primeras `n_rows` filas horarias (orden cronológico).
+
+    Bytes, no texto: en Windows, write_text traduce cada "\\n" a "\\r\\n", y
+    el md5 del toy dependería del sistema operativo que lo generó.
+    """
     toy.parent.mkdir(parents=True, exist_ok=True)
-    lines = raw.read_text(encoding="utf-8").splitlines(keepends=True)
-    toy.write_text("".join(lines[: n_rows + 1]), encoding="utf-8")
+    lines = raw.read_bytes().splitlines(keepends=True)
+    toy.write_bytes(b"".join(lines[: n_rows + 1]))
 
 
 def main() -> None:

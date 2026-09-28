@@ -35,7 +35,7 @@ torch.backends.cudnn.benchmark = False
 # rechazó v4 por eso. Fijar la semilla no garantiza que un candidato
 # futuro le gane a producción, pero hace que la MISMA corrida (mismo
 # commit, mismos datos) sea reproducible en vez de variar por azar en
-# cada ejecución del pipeline -- una corrida de train_model, dos veces,
+# cada ejecución del pipeline -- una corrida del job `train`, dos veces,
 # debe dar el mismo resultado.
 SEED = 42
 random.seed(SEED)

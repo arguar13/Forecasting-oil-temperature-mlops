@@ -109,7 +109,7 @@ services:
       retries: 40
       start_period: 20s
 
-  # Entrenamiento local -- corre en Linux, igual que el job "train_model" de
+  # Entrenamiento local -- corre en Linux, igual que el job "train" de
   # CI (.gitlab-ci.yml), para que MLflow persista rutas de artefacto con "/"
   # en vez del separador nativo del host (ver core_ml/train.Dockerfile). No
   # arranca con "docker compose up" (profile "tools") -- se invoca

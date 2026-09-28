@@ -7,34 +7,14 @@
 # nueva nace cifrada, y activar el cifrado sobre una instancia existente sin
 # cifrar NO la reemplaza (lo que borraría el backend store de MLflow).
 
+# Solo se fija lo que el stack raíz lee de verdad: el account_id arma el
+# nombre del bucket (s3.tf). Los módulos de la comunidad, que consumirían
+# muchos más datos del provider, no se ejecutan (override_module, abajo).
 mock_provider "aws" {
   mock_data "aws_caller_identity" {
     defaults = {
       account_id = "123456789012"
       arn        = "arn:aws:iam::123456789012:user/mock"
-    }
-  }
-  mock_data "aws_partition" {
-    defaults = {
-      partition  = "aws"
-      dns_suffix = "amazonaws.com"
-    }
-  }
-  mock_data "aws_iam_policy_document" {
-    defaults = {
-      json = "{\"Version\":\"2012-10-17\",\"Statement\":[]}"
-    }
-  }
-  # El provider valida el formato de los ARN (p. ej. el trust policy OIDC
-  # de iam.tf): los valores aleatorios de un mock no pasarían.
-  mock_resource "aws_iam_openid_connect_provider" {
-    defaults = {
-      arn = "arn:aws:iam::123456789012:oidc-provider/gitlab.com"
-    }
-  }
-  mock_resource "aws_iam_policy" {
-    defaults = {
-      arn = "arn:aws:iam::123456789012:policy/mock"
     }
   }
 }

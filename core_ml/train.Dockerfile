@@ -23,7 +23,7 @@ ENV PYTHONUTF8=1 \
 # un entrypoint corría `pip install` en cada `docker compose run`, y cada
 # `make train`/`train-toy`/`quality-gate` pagaba varios minutos de
 # instalación. Esta capa solo se reconstruye cuando cambia el lockfile
-# (`docker compose build trainer`, o automático vía `make up`).
+# (`docker compose build trainer`; `make up` no: trainer está en el profile tools).
 #
 # "poetry export" + pip, no "poetry install": en este entorno (Docker
 # Desktop/WSL2, python:3.10-slim), `poetry install` con el lockfile de

@@ -81,7 +81,9 @@ repos:
       # -------------------------------------------------------
       - id: terraform-fmt-check
         name: terraform fmt -check
-        entry: bash -c 'command -v terraform >/dev/null 2>&1 && terraform -chdir=terraform fmt -check -recursive || echo "terraform no instalado localmente, omitiendo"'
+        # if/else, no `A && B || C`: con esa forma, un `fmt -check` que falla
+        # también caía en el `|| echo` y el hook salía con 0 -- nunca bloqueaba.
+        entry: bash -c 'if command -v terraform >/dev/null 2>&1; then terraform -chdir=terraform fmt -check -recursive; else echo "terraform no instalado localmente, omitiendo"; fi'
         language: system
         files: ^terraform/.*\.tf$
         pass_filenames: false

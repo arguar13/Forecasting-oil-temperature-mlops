@@ -16,8 +16,8 @@ RUN pip install --no-cache-dir "poetry==$POETRY_VERSION" "poetry-plugin-export==
 COPY api/pyproject.toml api/poetry.lock ./
 # "poetry install --sync" (no "poetry export" + "pip install") moría en
 # silencio y de forma intermitente en este host (exit code 1, sin traceback
-# -- ver el mismo diagnóstico ya hecho para core_ml/train.Dockerfile y los
-# jobs train_model/quality_gate/integration_tests de .gitlab-ci.yml,
+# -- ver el mismo diagnóstico ya hecho para core_ml/train.Dockerfile y el
+# target install-core-ml-ci del Makefile, que lo esquiva de la misma forma;
 # torch/DVC traen dependencias con C-extensions que disparan el mismo bug
 # del instalador de poetry en Linux/Docker Desktop). Mismo fix aquí: exportar
 # a requirements.txt y usar pip, que sí resuelve estable.
