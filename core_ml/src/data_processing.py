@@ -114,7 +114,7 @@ class DataProcessor:
                 )
 
         # Perfil de referencia para el chequeo de drift (core_ml/src/monitoring/
-        # drift_check.py): media/std por sensor del split de train, ANTES de
+        # drift_check.py): banda de medias semanales por sensor sobre train, ANTES de
         # escalar -- para comparar contra lecturas crudas (grados C, MW) del
         # batch de inferencia, no la escala normalizada que produce
         # StandardScaler mas abajo. Solo las estadisticas de features; train.py

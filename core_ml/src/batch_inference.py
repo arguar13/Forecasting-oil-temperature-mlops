@@ -77,9 +77,11 @@ class BatchInferenceService:
                 run_id=version.run_id, artifact_path="monitoring/reference_profile.json"
             )
             self.reference_profile = ReferenceProfile.read(profile_path)
-        except (MlflowException, OSError):
-            # El drift check es informativo: una versión sin perfil (p. ej.
-            # registrada antes de que existiera) no debe bloquear el scoring.
+        except (MlflowException, OSError, KeyError, TypeError, ValueError):
+            # El drift check es informativo: una versión sin perfil, o con un
+            # perfil que este código no sabe leer (JSON corrupto, o escrito
+            # con otro formato de ReferenceProfile), no debe bloquear el
+            # scoring.
             logger.warning("reference_profile_unavailable", run_id=version.run_id, exc_info=True)
             self.reference_profile = None
         logger.info(

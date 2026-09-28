@@ -382,7 +382,7 @@ if __name__ == "__main__":
         logger.info("test_set_evaluated", **test_metrics)
 
         # Complete the reference profile data_processing.py started (raw
-        # per-sensor mean/std, no performance figures yet - it trained no
+        # per-sensor stats and weekly-mean band, no performance figures yet - it trained no
         # model) with the held-out metrics just computed, and log it as an
         # artifact of THIS run. batch_inference.py downloads it via the
         # served model's run_id and uses it for the post-inference drift

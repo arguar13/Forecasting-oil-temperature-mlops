@@ -286,3 +286,25 @@ def test_load_model_tolerates_a_missing_reference_profile(monkeypatch):
     assert svc.model is not None
     assert svc.reference_profile is None
     assert svc.seq_len == 48  # sin model_config: respaldo por defecto
+
+
+def test_load_model_tolerates_a_reference_profile_in_an_unknown_format(monkeypatch, tmp_path):
+    # Un perfil con otro formato de FeatureBaseline (solo mean/std): leerlo
+    # lanza TypeError, y el scoring tiene que seguir igual, sin drift check.
+    old_format = tmp_path / "reference_profile.json"
+    old_format.write_text(
+        '{"created_at": "2024-01-01T00:00:00+00:00", "n_rows": 10,'
+        ' "features": {"OT": {"mean": 16.3, "std": 8.4}}}'
+    )
+    monkeypatch.setattr("src.batch_inference.MlflowClient", _FakeRegistryClient)
+    monkeypatch.setattr("src.batch_inference.load_model", lambda uri: _model_with_config())
+    monkeypatch.setattr(
+        "src.batch_inference.mlflow.artifacts.download_artifacts",
+        lambda run_id, artifact_path: str(old_format),
+    )
+
+    svc = BatchInferenceService()
+    svc.load_model()
+
+    assert svc.model is not None
+    assert svc.reference_profile is None
