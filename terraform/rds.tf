@@ -39,6 +39,9 @@ resource "aws_db_instance" "mlflow_db" {
   vpc_security_group_ids = [aws_security_group.rds_sg.id]
   skip_final_snapshot    = true
   multi_az               = false
+  # Cifrado en reposo (KMS administrado por AWS, sin costo extra): el
+  # backend store de MLflow guarda parámetros, métricas y metadata de runs.
+  storage_encrypted = true
 }
 
 output "rds_endpoint" {

@@ -1,11 +1,16 @@
+import hashlib
+from types import SimpleNamespace
+
 import numpy as np
 
 from src.mlflow_utils import (
     DLinearForecaster,
     build_reproducibility_tags,
+    data_matches_dvc_pointer,
     get_container_image_tag,
     get_dvc_data_hash,
     get_git_commit_hash,
+    get_model_config,
 )
 from src.model_architecture import DLinear
 
@@ -114,3 +119,44 @@ def test_dlinear_forecaster_predict_handles_multi_step_horizon():
     result = forecaster.predict(context=None, model_input=batch)
 
     assert result.shape == (5, 48)
+
+
+def _write_data_and_pointer(tmp_path, content: bytes, pointer_md5: str):
+    (tmp_path / "data.csv").write_bytes(content)
+    dvc_file = tmp_path / "data.csv.dvc"
+    dvc_file.write_text(f"outs:\n- md5: {pointer_md5}\n  size: 10\n  path: data.csv\n")
+    return dvc_file
+
+
+def test_data_matches_dvc_pointer_when_hashes_agree(tmp_path):
+    content = b"date,OT\n2016-07-01 00:00:00,30.5\n"
+    dvc_file = _write_data_and_pointer(tmp_path, content, hashlib.md5(content).hexdigest())
+
+    assert data_matches_dvc_pointer(dvc_file) is True
+
+
+def test_data_does_not_match_dvc_pointer_when_file_differs(tmp_path):
+    dvc_file = _write_data_and_pointer(tmp_path, b"otro contenido", "0" * 32)
+
+    assert data_matches_dvc_pointer(dvc_file) is False
+
+
+def test_data_does_not_match_dvc_pointer_when_data_file_is_missing(tmp_path):
+    dvc_file = tmp_path / "data.csv.dvc"
+    dvc_file.write_text("outs:\n- md5: abc\n  size: 10\n  path: data.csv\n")
+
+    assert data_matches_dvc_pointer(dvc_file) is False
+
+
+def test_get_model_config_reads_pyfunc_flavor_config():
+    model = SimpleNamespace(
+        metadata=SimpleNamespace(
+            flavors={"python_function": {"model_config": {"seq_len": 24, "pred_len": 12}}}
+        )
+    )
+
+    assert get_model_config(model) == {"seq_len": 24, "pred_len": 12}
+
+
+def test_get_model_config_is_empty_for_objects_without_metadata():
+    assert get_model_config(object()) == {}

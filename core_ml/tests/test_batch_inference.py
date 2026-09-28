@@ -1,8 +1,10 @@
 import io
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
 import pytest
+from mlflow.exceptions import MlflowException
 
 from src.batch_inference import BatchInferenceService
 from src.data_contracts import FEATURE_COLUMNS, DataContractError
@@ -226,3 +228,56 @@ def test_process_batch_names_columns_per_horizon_step_for_multi_step_model(monke
     assert list(result_df.columns) == ["Prediction_h1", "Prediction_h2", "Prediction_h3"]
     assert len(result_df) == n_rows - service.seq_len + 1
     assert (result_df == 42.5).all().all()
+
+
+class _FakeRegistryClient:
+    def get_model_version_by_alias(self, name, alias):
+        return SimpleNamespace(version="7", run_id="run-123")
+
+
+def _model_with_config(**config):
+    model = _FakePyfuncModel()
+    model.metadata = SimpleNamespace(flavors={"python_function": {"model_config": config}})
+    return model
+
+
+def test_load_model_pins_the_resolved_version_and_reads_seq_len_from_it(monkeypatch, tmp_path):
+    profile = _reference_profile_matching(
+        {"HUFL": 5.8, "HULL": 2.0, "MUFL": 1.6, "MULL": 0.5, "LUFL": 4.2, "LULL": 1.3, "OT": 30.5}
+    )
+    profile_path = profile.write(tmp_path / "reference_profile.json")
+    loaded_uris = []
+
+    monkeypatch.setattr("src.batch_inference.MlflowClient", _FakeRegistryClient)
+    monkeypatch.setattr(
+        "src.batch_inference.load_model",
+        lambda uri: loaded_uris.append(uri) or _model_with_config(seq_len=24, n_features=10),
+    )
+    monkeypatch.setattr(
+        "src.batch_inference.mlflow.artifacts.download_artifacts",
+        lambda run_id, artifact_path: str(profile_path),
+    )
+
+    svc = BatchInferenceService()
+    svc.load_model()
+
+    # Versión fija (no el alias): modelo y perfil salen de la MISMA versión.
+    assert loaded_uris == [f"models:/{svc.model_name}/7"]
+    assert svc.seq_len == 24
+    assert svc.reference_profile is not None
+
+
+def test_load_model_tolerates_a_missing_reference_profile(monkeypatch):
+    def _missing(run_id, artifact_path):
+        raise MlflowException("artifact not found")
+
+    monkeypatch.setattr("src.batch_inference.MlflowClient", _FakeRegistryClient)
+    monkeypatch.setattr("src.batch_inference.load_model", lambda uri: _model_with_config())
+    monkeypatch.setattr("src.batch_inference.mlflow.artifacts.download_artifacts", _missing)
+
+    svc = BatchInferenceService()
+    svc.load_model()
+
+    assert svc.model is not None
+    assert svc.reference_profile is None
+    assert svc.seq_len == 48  # sin model_config: respaldo por defecto

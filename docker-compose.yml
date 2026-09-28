@@ -34,6 +34,11 @@ services:
       DEFAULT_REGION: us-east-1
       AWS_ACCESS_KEY_ID: test
       AWS_SECRET_ACCESS_KEY: test  # pragma: allowlist secret -- credencial fija de LocalStack, nunca se usa fuera del stack local
+      # Ojo: la persistencia de LocalStack es una función de la edición de
+      # pago; en la Community el estado de S3 (artefactos de MLflow, remoto
+      # DVC) se pierde al recrear el contenedor, mientras Postgres (volumen
+      # pgdata) conserva los runs/versiones que apuntan a ellos. Tras un
+      # `make down`, reentrenar (`make train-toy` o `make train`).
       PERSISTENCE: 1
     ports:
       - "4566:4566"
@@ -97,7 +102,6 @@ services:
     depends_on:
       mlflow:
         condition: service_healthy
-    command: uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 10s

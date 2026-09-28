@@ -5,6 +5,11 @@ terraform {
       source  = "hashicorp/aws"
       version = "~> 5.0"
     }
+    # data "tls_certificate" (iam.tf, thumbprint del OIDC de GitLab).
+    tls = {
+      source  = "hashicorp/tls"
+      version = "~> 4.0"
+    }
   }
 
   # En producción REAL usamos S3 y DynamoDB para State Locking

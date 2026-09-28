@@ -189,7 +189,16 @@ make up
 # or point .dvc/config.local at LocalStack (see .dvc/config.local.example)
 cp .dvc/config.local.example .dvc/config.local
 make dvc-pull
+
+# No DVC remote reachable (e.g. a fresh clone: the LocalStack bucket starts
+# empty)? Download ETTh1 from the public ETDataset repo and build the toy set
+make data-download
 ```
+
+`make data-download` fetches the same data, but not byte-identical to the
+DVC-tracked copy (that one was re-saved with pandas), so training runs
+tag `data_matches_dvc_pointer=false` in MLflow — the DVC hash recorded
+then describes the pointer, not the bytes actually used.
 
 `docker-compose.yml` stands in for AWS end to end: LocalStack simulates S3
 (model artifacts and the DVC remote), Postgres simulates RDS, and MLflow
@@ -203,7 +212,11 @@ Once the stack is up:
 - MLflow UI: http://localhost:5000
 
 `make down` stops the stack (data volumes are preserved). `make logs` /
-`make ps` follow logs and check the state of each service.
+`make ps` follow logs and check the state of each service. Note that
+LocalStack Community does not persist S3 state across container
+recreation, while Postgres does: after a `make down`, MLflow still lists
+older runs whose artifacts are gone, so retrain (`make train-toy` or
+`make train`) before serving.
 
 ## Training a model
 
@@ -243,6 +256,13 @@ there is no `production` version yet, the first candidate becomes the
 baseline. A worse model never gets promoted, and the script exits non-zero
 when it rejects a candidate, so a CI pipeline built around it would stop
 before deploying a regression.
+
+The comparison only happens between comparable runs: both versions must
+share `dataset`, `seq_len` and `pred_len`, otherwise their test MSEs
+measure different things and the candidate is rejected (promote by hand
+if the configuration change is intentional). A `toy` smoke-test model can
+never replace a model trained on real data, while a real model always
+replaces a `toy` baseline.
 
 ## Batch inference and drift monitoring
 

@@ -37,27 +37,40 @@ class series_decomp(nn.Module):
 
 
 class DLinear(nn.Module):
-    def __init__(self, seq_len=48, n_features=10, pred_len=1):
+    """DLinear (Zeng et al., 2023) con cabezal de salida univariado.
+
+    1. Descompone cada canal de la ventana de entrada en tendencia (media
+       móvil) + estacionalidad (residuo).
+    2. Proyecta cada componente con una capa lineal seq_len -> pred_len,
+       compartida entre canales: cada paso del horizonte tiene sus propios
+       pesos sobre las seq_len lecturas pasadas (como en el paper).
+    3. Combina los n_features canales en el único target (OT), paso a paso
+       del horizonte.
+
+    Entrada: [batch, seq_len, n_features]. Salida: [batch, pred_len].
+    """
+
+    def __init__(self, seq_len=48, n_features=10, pred_len=1, kernel_size=25):
         super().__init__()
         self.seq_len = seq_len
         self.pred_len = pred_len
-        self.decompsition = series_decomp(25)
-        self.Linear_Seasonal = nn.Linear(seq_len, 1)
-        self.Linear_Trend = nn.Linear(seq_len, 1)
-        # pred_len, no 1: define cuántos pasos futuros produce cada
-        # ventana. Sigue siendo la misma arquitectura DLinear (descompone
-        # en estacional/tendencia, proyecta seq_len->1 por canal, combina
-        # los n_features) -- solo cambia el ancho de esta última capa, el
-        # cabezal de salida.
-        self.combine = nn.Linear(n_features, pred_len)
+        self.decomposition = series_decomp(kernel_size)
+        # seq_len -> pred_len, no seq_len -> 1: con una proyección a un solo
+        # escalar por canal, los pred_len pasos del horizonte salían todos de
+        # los mismos n_features números (un cuello de botella de 10 valores
+        # para predecir 48 horas), en vez de tener pesos temporales propios.
+        self.Linear_Seasonal = nn.Linear(seq_len, pred_len)
+        self.Linear_Trend = nn.Linear(seq_len, pred_len)
+        self.combine = nn.Linear(n_features, 1)
 
     def forward(self, x):
-        seasonal_init, trend_init = self.decompsition(x)
+        seasonal_init, trend_init = self.decomposition(x)
+        # [batch, seq_len, n_features] -> [batch, n_features, seq_len]
         seasonal_init = seasonal_init.permute(0, 2, 1)
         trend_init = trend_init.permute(0, 2, 1)
 
-        seasonal_out = self.Linear_Seasonal(seasonal_init).squeeze(-1)
-        trend_out = self.Linear_Trend(trend_init).squeeze(-1)
+        # [batch, n_features, pred_len]
+        x = self.Linear_Seasonal(seasonal_init) + self.Linear_Trend(trend_init)
 
-        x = seasonal_out + trend_out
-        return self.combine(x)
+        # [batch, pred_len, n_features] -> [batch, pred_len, 1] -> [batch, pred_len]
+        return self.combine(x.permute(0, 2, 1)).squeeze(-1)

@@ -7,7 +7,14 @@ import pandas as pd
 import torch
 from sklearn.preprocessing import StandardScaler
 
-from src.data_contracts import ETT_CONTRACT, TOY_ETT_CONTRACT, ETTDatasetContract, validate_ett_csv
+from src.data_contracts import (
+    ETT_CONTRACT,
+    FEATURE_COLUMNS,
+    TOY_ETT_CONTRACT,
+    DataContractError,
+    ETTDatasetContract,
+    validate_ett_csv,
+)
 from src.logging_config import configure_logging, get_logger
 from src.monitoring.drift_check import build_feature_baselines
 
@@ -40,8 +47,7 @@ class DataProcessor:
         # ventana, no un único escalar.
         self.pred_length = pred_length
 
-        if not os.path.exists(self.output_dir):
-            os.makedirs(self.output_dir)
+        os.makedirs(self.output_dir, exist_ok=True)
 
     def _create_sequences(self, X: np.ndarray, y: np.ndarray):
         """Genera secuencias de ventanas deslizantes.
@@ -68,7 +74,9 @@ class DataProcessor:
         data = validate_ett_csv(self.data_path, contract=self.contract)
         logger.info("Contrato de datos OK.")
 
-        data["date"] = pd.to_datetime(data["date"])
+        data["date"] = pd.to_datetime(data["date"], format="%Y-%m-%d %H:%M:%S")
+        # Las ventanas deslizantes asumen orden cronológico.
+        data.sort_values("date", inplace=True)
         data.set_index("date", inplace=True)
         date_index = pd.DatetimeIndex(data.index)
 
@@ -78,7 +86,10 @@ class DataProcessor:
         data["hour"] = date_index.hour
 
         target_col = self.contract.target_column
-        feature_cols = data.columns.tolist()
+        # Columnas explícitas del contrato (mismo orden que esperan la API y
+        # el batch), no `data.columns`: una columna extra en el CSV cambiaría
+        # en silencio n_features y el orden de entrada del modelo.
+        feature_cols = list(FEATURE_COLUMNS)
 
         # 2. Partición Train/Val/Test (70% / 10% / 20%)
         n = len(data)
@@ -88,6 +99,19 @@ class DataProcessor:
         train_data = data.iloc[:train_size]
         val_data = data.iloc[train_size : train_size + val_size]
         test_data = data.iloc[train_size + val_size :]
+
+        # FAIL FAST: cada split necesita al menos seq_length + pred_length
+        # filas para producir una sola ventana. Sin este chequeo, un split
+        # corto genera arrays vacíos y el error aparece mucho después, en
+        # train.py, como un ZeroDivisionError sin contexto.
+        min_split_rows = self.seq_length + self.pred_length
+        for split_name, split_df in (("train", train_data), ("val", val_data), ("test", test_data)):
+            if len(split_df) < min_split_rows:
+                raise DataContractError(
+                    f"El split '{split_name}' tiene {len(split_df)} filas; se necesitan al "
+                    f"menos {min_split_rows} (seq_length={self.seq_length} + "
+                    f"pred_length={self.pred_length}) para generar una ventana."
+                )
 
         # Perfil de referencia para el chequeo de drift (core_ml/src/monitoring/
         # drift_check.py): media/std por sensor del split de train, ANTES de

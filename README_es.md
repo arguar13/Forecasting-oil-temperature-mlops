@@ -196,7 +196,17 @@ make up
 # apuntá .dvc/config.local a LocalStack (ver .dvc/config.local.example)
 cp .dvc/config.local.example .dvc/config.local
 make dvc-pull
+
+# ¿Sin remoto DVC alcanzable (p. ej. un clon nuevo: el bucket de LocalStack
+# arranca vacío)? Descarga ETTh1 del repo público de ETDataset y genera el toy
+make data-download
 ```
+
+`make data-download` baja los mismos datos, pero no idénticos byte a byte a
+la copia trackeada por DVC (esa se reescribió con pandas), así que las
+corridas de entrenamiento registran `data_matches_dvc_pointer=false` en
+MLflow -- el hash de DVC registrado describe entonces al puntero, no a los
+bytes realmente usados.
 
 `docker-compose.yml` reemplaza a AWS de punta a punta: LocalStack simula
 S3 (artefactos del modelo y remoto de DVC), Postgres simula RDS, y MLflow
@@ -211,6 +221,10 @@ Con el stack levantado:
 
 `make down` detiene el stack (conserva los volúmenes de datos). `make
 logs` y `make ps` siguen los logs y muestran el estado de cada servicio.
+Ojo: LocalStack Community no persiste el estado de S3 al recrear el
+contenedor, pero Postgres sí: tras un `make down`, MLflow sigue listando
+runs cuyos artefactos ya no existen, así que hay que reentrenar (`make
+train-toy` o `make train`) antes de servir.
 
 ## Entrenar un modelo
 
@@ -251,6 +265,13 @@ versión `production`, la primera candidata se convierte en la línea base.
 Un modelo peor nunca se promueve, y el script termina con código de salida
 distinto de cero cuando rechaza una candidata, de forma que un pipeline de
 CI construido sobre él se detiene antes de desplegar una regresión.
+
+La comparación solo ocurre entre corridas comparables: ambas versiones
+deben compartir `dataset`, `seq_len` y `pred_len`; si no, sus MSE de test
+miden cosas distintas y la candidata se rechaza (promover a mano si el
+cambio de configuración es intencional). Un modelo de humo `toy` nunca
+reemplaza a uno entrenado con datos reales, y un modelo real siempre
+reemplaza a una línea base `toy`.
 
 ## Inferencia por lotes y monitoreo de drift
 

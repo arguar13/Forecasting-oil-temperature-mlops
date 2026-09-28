@@ -26,7 +26,11 @@ logger = get_logger(__name__)
 # (ver core_ml/src/mlflow_utils.py::DLinearForecaster).
 MODEL_NAME = os.getenv("MODEL_NAME", "dlinear-ett-forecaster")
 MODEL_ALIAS = os.getenv("MODEL_ALIAS", "production")
+# Forma de entrada que fija el contrato HTTP (PredictionRequest). Al cargar
+# el modelo se verifica que coincida con la que declara el propio modelo
+# registrado (model_config), ver _check_model_matches_contract.
 SEQ_LEN = 48
+N_FEATURES = 10
 
 model: PyFuncModel | None = None
 
@@ -52,6 +56,23 @@ def _load_model_resilient(model_uri: str) -> PyFuncModel:
     return cast(PyFuncModel, load_model(model_uri))
 
 
+def _check_model_matches_contract(loaded_model: PyFuncModel) -> None:
+    """Falla si el modelo registrado espera otra forma de entrada.
+
+    Sin esto, un modelo reentrenado con otro seq_len pasaría /ready y cada
+    /predict fallaría (o, peor, produciría basura) en tiempo de request.
+    """
+    config = getattr(getattr(loaded_model, "metadata", None), "flavors", {}) or {}
+    model_config = config.get("python_function", {}).get("model_config") or {}
+    expected = {"seq_len": SEQ_LEN, "n_features": N_FEATURES}
+    for key, value in expected.items():
+        declared = model_config.get(key)
+        if declared is not None and int(declared) != value:
+            raise ValueError(
+                f"El modelo declara {key}={declared}, pero el contrato de la API espera {value}."
+            )
+
+
 # ---------------------------------------------------------
 # FASTAPI APP & ENDPOINTS
 # ---------------------------------------------------------
@@ -63,7 +84,9 @@ async def lifespan(app: FastAPI):
     model_uri = f"models:/{MODEL_NAME}@{MODEL_ALIAS}"
     logger.info("model_load_started", model_uri=model_uri)
     try:
-        model = _load_model_resilient(model_uri)
+        loaded_model = _load_model_resilient(model_uri)
+        _check_model_matches_contract(loaded_model)
+        model = loaded_model
         logger.info("model_load_succeeded", model_uri=model_uri)
     except Exception:
         # No tumba el proceso: un pod recién desplegado antes del primer
@@ -168,9 +191,13 @@ def predict(request: PredictionRequest):
             "predictions": predictions,
         }
     except Exception as e:
+        # El payload ya pasó la validación de Pydantic (422 si no), así que
+        # un error aquí es del servidor (modelo/runtime), no del cliente: 500,
+        # y sin reenviar el mensaje interno de la excepción al cliente.
         logger.error(
             "predict_failed",
             error=str(e),
             duration_ms=round((time.monotonic() - start) * 1000, 2),
+            exc_info=True,
         )
-        raise HTTPException(status_code=400, detail=f"Error en la inferencia: {str(e)}") from e
+        raise HTTPException(status_code=500, detail="Error interno durante la inferencia.") from e

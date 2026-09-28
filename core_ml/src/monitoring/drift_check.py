@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime, timezone  # not datetime.UTC: 3.11+ only, runtime images are 3.10
 from pathlib import Path
 from typing import Any
 
@@ -99,7 +99,7 @@ def build_feature_baselines(raw_train_df: pd.DataFrame) -> ReferenceProfile:
         features[column] = FeatureBaseline(mean=float(np.mean(values)), std=max(std, 1e-6))
 
     return ReferenceProfile(
-        created_at=datetime.now(UTC).isoformat(),
+        created_at=datetime.now(timezone.utc).isoformat(),
         n_rows=int(len(raw_train_df)),
         features=features,
     )
@@ -157,7 +157,7 @@ def check_batch_for_drift(
 
     return DriftReport(
         status="drift" if drifted else "ok",
-        checked_at=datetime.now(UTC).isoformat(),
+        checked_at=datetime.now(timezone.utc).isoformat(),
         n_rows=len(batch_df),
         drifted_features=drifted,
         per_feature=per_feature,

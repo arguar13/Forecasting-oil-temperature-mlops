@@ -72,6 +72,13 @@ Thumbs.db
 # Estado interno de herramientas de asistencia (Claude Code, etc.)
 .claude/
 
+# Documentación personal de estudio: guía del proyecto y guía de ejecución
+# (.docx). Material privado, no forma parte del repositorio público.
+Guia completa del proyecto*/
+GUIA_EJECUCION_PROYECTO*
+*.docx
+~$*.docx
+
 # ========================
 # Validación local de CI (Fase 4)
 # ========================

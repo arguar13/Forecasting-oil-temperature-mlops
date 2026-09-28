@@ -14,6 +14,7 @@ para servirlo.
 
 from __future__ import annotations
 
+import hashlib
 import os
 
 # Solo se usa para `git rev-parse HEAD` más abajo, sin shell ni input externo.
@@ -84,6 +85,35 @@ def get_dvc_data_hash(dvc_file_path: str | Path) -> str:
         return UNKNOWN
 
 
+def data_matches_dvc_pointer(dvc_file_path: str | Path) -> bool:
+    """True si el archivo de datos local tiene exactamente el hash MD5 que
+    declara su puntero `.dvc`.
+
+    `dvc_data_hash` se lee del puntero, no de los bytes usados: sin esta
+    verificación, entrenar con un CSV modificado (o descargado de otra
+    fuente) registraría en MLflow un hash que no corresponde a los datos
+    reales de la corrida.
+    """
+    dvc_path = Path(dvc_file_path)
+    data_path = dvc_path.with_suffix("")  # "ETTh1.csv.dvc" -> "ETTh1.csv"
+    expected = get_dvc_data_hash(dvc_path)
+    if expected == UNKNOWN or not data_path.exists():
+        return False
+    digest = hashlib.md5(usedforsecurity=False)
+    with data_path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            digest.update(chunk)
+    matches = digest.hexdigest() == expected
+    if not matches:
+        logger.warning(
+            "data_does_not_match_dvc_pointer",
+            data_path=str(data_path),
+            expected_md5=expected,
+            actual_md5=digest.hexdigest(),
+        )
+    return matches
+
+
 def get_container_image_tag() -> str:
     """Tag de la imagen de contenedor que ejecuta esta corrida.
 
@@ -100,6 +130,7 @@ def build_reproducibility_tags(dvc_file_path: str | Path) -> dict[str, str]:
         "git_commit_hash": get_git_commit_hash(),
         "dvc_data_hash": get_dvc_data_hash(dvc_file_path),
         "dvc_data_file": str(dvc_file_path),
+        "data_matches_dvc_pointer": str(data_matches_dvc_pointer(dvc_file_path)).lower(),
         "container_image_tag": get_container_image_tag(),
     }
 
@@ -168,6 +199,20 @@ class DLinearForecaster(PythonModel):
         n_windows, pred_len = output_scaled.shape
         flat = output_scaled.numpy().reshape(-1, 1)
         return self.scaler_y.inverse_transform(flat).reshape(n_windows, pred_len)
+
+
+def get_model_config(model: Any) -> dict[str, Any]:
+    """Devuelve el `model_config` (seq_len, n_features, pred_len) con el que
+    se registró un modelo pyfunc cargado.
+
+    Permite que los consumidores (API, batch) validen la forma de entrada
+    contra el modelo realmente servido en vez de asumir un seq_len fijo.
+    Devuelve {} si el modelo no trae metadata (p. ej. dobles de test).
+    """
+    metadata = getattr(model, "metadata", None)
+    flavors = getattr(metadata, "flavors", None) or {}
+    config = flavors.get("python_function", {}).get("model_config") or {}
+    return dict(config)
 
 
 def log_and_register_model(

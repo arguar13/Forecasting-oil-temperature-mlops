@@ -11,7 +11,7 @@ from src.train import ModelTrainer
 class _FixedOutputModel(nn.Module):
     """Ignora la entrada y siempre devuelve el mismo tensor - permite
     verificar la matemática de evaluate_test_set (inverse_transform,
-    MSE/MAE/RMSE/MAPE) contra valores calculados a mano, sin depender de si
+    MSE/MAE/RMSE/WAPE) contra valores calculados a mano, sin depender de si
     un entrenamiento real convergió a algo predecible."""
 
     def __init__(self, fixed_output: torch.Tensor):
@@ -54,9 +54,7 @@ def test_evaluate_test_set_computes_metrics_in_original_units(tmp_path):
     trainer = ModelTrainer(artifact_dir=str(tmp_path), batch_size=256)
 
     # Predicciones escaladas -> originales: [0, 5, 10, 20]. Solo la última
-    # ventana tiene error (5 grados), y su target real (15) no está cerca de
-    # cero -- deja fuera, a propósito, el caso limite de MAPE, que se cubre
-    # en el test de abajo.
+    # ventana tiene error (5 grados).
     scaled_preds = torch.tensor([[-1.0], [0.0], [1.0], [3.0]])
     model = _FixedOutputModel(scaled_preds)
 
@@ -68,28 +66,55 @@ def test_evaluate_test_set_computes_metrics_in_original_units(tmp_path):
     assert metrics["test_rmse"] == pytest_approx(2.5)
     # rmse debe ser literalmente sqrt(mse), no un número inventado aparte.
     assert metrics["test_rmse"] == pytest_approx(metrics["test_mse"] ** 0.5)
-    # mape: solo la última ventana aporta error, target real=15 -> 5/15*100/4
-    assert metrics["test_mape"] == pytest_approx((5 / 15) * 100 / 4)
+    # wape: sum|errores| / sum|reales| = 5 / (0 + 5 + 10 + 15)
+    assert metrics["test_wape"] == pytest_approx(5 / 30 * 100)
 
 
-def test_evaluate_test_set_guards_mape_against_a_near_zero_target(tmp_path):
+def test_evaluate_test_set_wape_is_not_blown_up_by_a_near_zero_target(tmp_path):
     scaler_y = StandardScaler().fit(np.array([[0.0], [10.0]]))
     scaler_y_path = tmp_path / "scaler_y.pkl"
     joblib.dump(scaler_y, scaler_y_path)
 
-    # Target escalado -1.0 -> original 0.0: exactamente el caso limite que
-    # rompería un MAPE sin guardia (division por cero).
-    scaled_targets = torch.tensor([[-1.0]])
+    # Targets originales [0.0, 10.0]: el primero es exactamente el caso que
+    # hace explotar un MAPE punto a punto (division por ~0).
+    scaled_targets = torch.tensor([[-1.0], [1.0]])
     _write_trainer_artifacts(tmp_path, scaled_targets)
 
     trainer = ModelTrainer(artifact_dir=str(tmp_path), batch_size=256)
 
-    # Predicción igual al target -> error cero, así que el valor exacto del
-    # epsilon de la guardia no importa para este assert: lo que se verifica
-    # es que no lanza ZeroDivisionError/produce inf o NaN.
-    model = _FixedOutputModel(scaled_targets)
+    # Predicciones originales [1.0, 10.0]: 1 grado de error justo sobre el
+    # target 0. WAPE = 1 / (0 + 10) = 10%, un valor acotado e interpretable.
+    model = _FixedOutputModel(torch.tensor([[-0.8], [1.0]]))
 
     metrics = trainer.evaluate_test_set(model, scaler_y_path=str(scaler_y_path))
 
-    assert metrics["test_mape"] == pytest_approx(0.0)
-    assert np.isfinite(metrics["test_mape"])
+    assert metrics["test_wape"] == pytest_approx(10.0)
+
+
+def _mean_val_loss(trainer: ModelTrainer, model: nn.Module) -> float:
+    criterion = nn.MSELoss()
+    model.eval()
+    with torch.no_grad():
+        losses = [criterion(model(x_b), y_b).item() for x_b, y_b in trainer.val_loader]
+    return sum(losses) / len(losses)
+
+
+def test_train_restores_the_best_validation_checkpoint(tmp_path, monkeypatch):
+    """Regresión: best_state guardaba model.state_dict() sin copiar (son
+    referencias a los tensores vivos), así que el modelo "restaurado" era
+    en realidad el de la última época. Un lr enorme hace que val empeore
+    tras las primeras épocas: el modelo devuelto debe reproducir
+    exactamente el mejor val MSE reportado, no el de la última época."""
+    monkeypatch.setattr("src.train.mlflow.log_metrics", lambda *a, **k: None)
+    torch.manual_seed(0)
+    seq_len, n_features = 8, 3
+    for name, n in (("train", 64), ("val", 32), ("test", 8)):
+        torch.save(
+            (torch.randn(n, seq_len, n_features), torch.randn(n, 1)),
+            tmp_path / f"{name}_tensors.pt",
+        )
+    trainer = ModelTrainer(artifact_dir=str(tmp_path), batch_size=16)
+
+    _, best_val_loss, model = trainer.train(best_lr=5.0, epochs=6, patience=10)
+
+    assert _mean_val_loss(trainer, model) == pytest_approx(best_val_loss, rel=1e-5)

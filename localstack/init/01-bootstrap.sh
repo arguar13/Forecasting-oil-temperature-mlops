@@ -7,8 +7,14 @@ set -e
 
 BUCKET="mlops-portafolio-proj3-models"
 
-echo "[localstack-init] Creando bucket S3 s3://${BUCKET} ..."
-awslocal s3 mb "s3://${BUCKET}"
+# Idempotente: con `set -e`, un `s3 mb` sobre un bucket que ya existe (p. ej.
+# si el estado persistió entre reinicios) abortaría el script.
+if awslocal s3api head-bucket --bucket "${BUCKET}" >/dev/null 2>&1; then
+  echo "[localstack-init] El bucket s3://${BUCKET} ya existe, no se recrea."
+else
+  echo "[localstack-init] Creando bucket S3 s3://${BUCKET} ..."
+  awslocal s3 mb "s3://${BUCKET}"
+fi
 awslocal s3api put-bucket-versioning --bucket "${BUCKET}" --versioning-configuration Status=Enabled
 
 echo "[localstack-init] Bootstrap completado."

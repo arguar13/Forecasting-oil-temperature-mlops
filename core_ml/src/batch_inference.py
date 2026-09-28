@@ -5,6 +5,7 @@ import boto3
 import mlflow
 import numpy as np
 import pandas as pd
+from mlflow.exceptions import MlflowException
 from mlflow.pyfunc import PyFuncModel, load_model
 from mlflow.tracking import MlflowClient
 from tenacity import retry, stop_after_attempt, wait_exponential
@@ -16,6 +17,7 @@ from src.data_contracts import (
     validate_feature_dataframe,
 )
 from src.logging_config import configure_logging, get_logger
+from src.mlflow_utils import get_model_config
 from src.monitoring.drift_check import ReferenceProfile, check_batch_for_drift, log_drift_report
 
 configure_logging()
@@ -23,6 +25,8 @@ logger = get_logger(__name__)
 
 DEFAULT_MODEL_NAME = "dlinear-ett-forecaster"
 DEFAULT_MODEL_ALIAS = "production"
+# Solo como respaldo si el modelo cargado no declara su seq_len.
+DEFAULT_SEQ_LEN = 48
 
 # Retry con backoff acotado (máx. 3 intentos): cubre blips transitorios de
 # red contra S3/MLflow sin reintentar para siempre. El propio `backoffLimit`
@@ -44,8 +48,8 @@ class BatchInferenceService:
         self.output_key = os.getenv("BATCH_OUTPUT_KEY", "batch/predictions_output.csv")
         self.model_name = os.getenv("MODEL_NAME", DEFAULT_MODEL_NAME)
         self.model_alias = os.getenv("MODEL_ALIAS", DEFAULT_MODEL_ALIAS)
-        self.seq_len = 48
-        self.batch_size = 512
+        self.seq_len = DEFAULT_SEQ_LEN
+        self.batch_size = int(os.getenv("BATCH_SIZE", "512"))
         self.model: PyFuncModel | None = None
         self.reference_profile: ReferenceProfile | None = None
 
@@ -56,18 +60,34 @@ class BatchInferenceService:
         modelo y sus scalers viajan juntos como un único artefacto versionado.
         """
         mlflow.set_tracking_uri(os.getenv("MLFLOW_TRACKING_URI", "http://localhost:5000"))
-        model_uri = f"models:/{self.model_name}@{self.model_alias}"
-        logger.info("model_load_started", model_uri=model_uri)
-        self.model = load_model(model_uri)
-
-        # También se descarga el perfil de referencia de esta misma versión
-        # (logueado por train.py) para el chequeo de drift al final del batch.
+        # El alias se resuelve UNA vez a un número de versión, y tanto el
+        # modelo como su perfil de referencia se cargan de esa versión: si
+        # quality_gate moviera el alias entre dos resoluciones, el drift se
+        # compararía contra el perfil de otro modelo.
         version = MlflowClient().get_model_version_by_alias(self.model_name, self.model_alias)
-        profile_path = mlflow.artifacts.download_artifacts(
-            run_id=version.run_id, artifact_path="monitoring/reference_profile.json"
+        model_uri = f"models:/{self.model_name}/{version.version}"
+        logger.info("model_load_started", model_uri=model_uri, alias=self.model_alias)
+        self.model = load_model(model_uri)
+        # seq_len sale del modelo servido, no de una constante: si se
+        # reentrena con otra ventana, el batch se adapta sin tocar código.
+        self.seq_len = int(get_model_config(self.model).get("seq_len", DEFAULT_SEQ_LEN))
+
+        try:
+            profile_path = mlflow.artifacts.download_artifacts(
+                run_id=version.run_id, artifact_path="monitoring/reference_profile.json"
+            )
+            self.reference_profile = ReferenceProfile.read(profile_path)
+        except (MlflowException, OSError):
+            # El drift check es informativo: una versión sin perfil (p. ej.
+            # registrada antes de que existiera) no debe bloquear el scoring.
+            logger.warning("reference_profile_unavailable", run_id=version.run_id, exc_info=True)
+            self.reference_profile = None
+        logger.info(
+            "model_load_succeeded",
+            model_uri=model_uri,
+            version=version.version,
+            seq_len=self.seq_len,
         )
-        self.reference_profile = ReferenceProfile.read(profile_path)
-        logger.info("model_load_succeeded", model_uri=model_uri, version=version.version)
 
     @_RESILIENT_RETRY
     def _download_input(self) -> pd.DataFrame:

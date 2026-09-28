@@ -1,5 +1,9 @@
 import numpy as np
+import pandas as pd
+import pytest
+import torch
 
+from src.data_contracts import FEATURE_COLUMNS, DataContractError, ETTDatasetContract
 from src.data_processing import DataProcessor
 
 
@@ -41,3 +45,57 @@ def test_create_sequences_supports_multi_step_horizon(tmp_path):
     np.testing.assert_array_equal(ys[0], y[3:5].squeeze(-1))
     np.testing.assert_array_equal(xs[-1], x[5:8])
     np.testing.assert_array_equal(ys[-1], y[8:10].squeeze(-1))
+
+
+def _write_raw_csv(path, n_rows: int, extra_column: bool = False) -> None:
+    dates = pd.date_range("2016-07-01", periods=n_rows, freq="h")
+    rng = np.random.default_rng(0)
+    df = pd.DataFrame(
+        {
+            "date": dates.strftime("%Y-%m-%d %H:%M:%S"),
+            "HUFL": rng.uniform(0, 10, n_rows),
+            "HULL": rng.uniform(0, 5, n_rows),
+            "MUFL": rng.uniform(0, 5, n_rows),
+            "MULL": rng.uniform(0, 2, n_rows),
+            "LUFL": rng.uniform(0, 5, n_rows),
+            "LULL": rng.uniform(0, 2, n_rows),
+            "OT": rng.uniform(10, 40, n_rows),
+        }
+    )
+    if extra_column:
+        df["unexpected_sensor"] = 1.0
+    df.to_csv(path, index=False)
+
+
+def test_process_and_save_fails_fast_when_a_split_is_too_short(tmp_path):
+    csv_path = tmp_path / "ett.csv"
+    _write_raw_csv(csv_path, n_rows=300)  # val = 30 filas < seq(24) + pred(24)
+    processor = DataProcessor(
+        data_path=str(csv_path),
+        seq_length=24,
+        output_dir=str(tmp_path / "out"),
+        contract=ETTDatasetContract(min_rows=200),
+        pred_length=24,
+    )
+
+    with pytest.raises(DataContractError, match="split 'val'"):
+        processor.process_and_save()
+
+
+def test_process_and_save_uses_only_contract_feature_columns(tmp_path):
+    csv_path = tmp_path / "ett.csv"
+    _write_raw_csv(csv_path, n_rows=400, extra_column=True)
+    out_dir = tmp_path / "out"
+    processor = DataProcessor(
+        data_path=str(csv_path),
+        seq_length=8,
+        output_dir=str(out_dir),
+        contract=ETTDatasetContract(min_rows=200),
+        pred_length=4,
+    )
+
+    processor.process_and_save()
+
+    x_train, y_train = torch.load(out_dir / "train_tensors.pt", weights_only=True)
+    assert x_train.shape[1:] == (8, len(FEATURE_COLUMNS))  # la columna extra se ignora
+    assert y_train.shape[1] == 4

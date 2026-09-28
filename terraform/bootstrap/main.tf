@@ -61,7 +61,8 @@ resource "aws_dynamodb_table" "tf_locks" {
 # ------------------------------------------------------------------------------
 # Password de RDS -- se genera acá una única vez y se pasa a mano como
 # var.db_password al stack principal (../rds.tf) y como valor del Secret de
-# Kubernetes (kubernetes/base/secret.yaml). Sin Secrets Manager de por medio:
+# Kubernetes `mlflow-db-credentials` (creado a mano, ver
+# kubernetes/base/mlflow.yaml). Sin Secrets Manager de por medio:
 # un valor sensible, generado una vez, copiado a los dos lugares que lo usan.
 # ------------------------------------------------------------------------------
 resource "random_password" "db_password" {

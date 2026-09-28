@@ -5,7 +5,9 @@ metadata:
   labels:
     app: dlinear-forecast
 spec:
-  replicas: 3
+  # Sin `replicas`: el HPA (hpa.yaml, minReplicas: 3) es el dueño del
+  # número de réplicas. Declararlo aquí haría que cada `kubectl apply -k`
+  # lo resetee, pisando la escala que el HPA haya decidido.
   selector:
     matchLabels:
       app: dlinear-forecast
@@ -15,6 +17,11 @@ spec:
         app: dlinear-forecast
     spec:
       serviceAccountName: dlinear-sa
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001  # mismo UID que crea el Dockerfile
+        seccompProfile:
+          type: RuntimeDefault
       containers:
       - name: dlinear-container
         # Nombre lógico: el overlay de cada entorno lo remapea al registro/
@@ -23,12 +30,26 @@ spec:
         image: dlinear-api:base
         ports:
         - containerPort: 8000
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
 
+        # El lifespan de la API carga el modelo (con reintentos y backoff)
+        # ANTES de empezar a responder: durante ese tiempo /health no
+        # contesta. El startupProbe da hasta ~2 min de margen y deja en
+        # pausa al livenessProbe, que así no reinicia un pod que solo está
+        # arrancando.
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          periodSeconds: 5
+          failureThreshold: 24
         livenessProbe:
           httpGet:
             path: /health
             port: 8000
-          initialDelaySeconds: 15
           periodSeconds: 20
         readinessProbe:
           # Distinto de /health: solo pasa si el modelo terminó de cargar
@@ -37,15 +58,17 @@ spec:
           httpGet:
             path: /ready
             port: 8000
-          initialDelaySeconds: 5
           periodSeconds: 10
 
         resources:
+          # PyTorch + MLflow + pandas cargados en memoria ya rondan los
+          # 400-500Mi: con un límite de 512Mi el pod quedaba al borde del
+          # OOMKill en cuanto llegaba tráfico.
           requests:
-            memory: "256Mi"
+            memory: "512Mi"
             cpu: "250m"
           limits:
-            memory: "512Mi"
+            memory: "1Gi"
             cpu: "500m"
 
         # Toda la configuración no sensible vive en el ConfigMap (declarativo,

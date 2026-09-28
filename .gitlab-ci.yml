@@ -54,7 +54,7 @@ stages:
     - export AWS_SESSION_TOKEN=$(echo "$STS_OUTPUT" | awk '{print $3}')
 
 # ========================
-# Lint + tests unitarios (api/ y core_ml/) -- el mismo `make lint`/`make test`
+# Formato + lint + tests unitarios (api/ y core_ml/) -- el mismo `make ci`
 # que corre en local antes de hacer push.
 # ========================
 lint_test:
@@ -70,8 +70,9 @@ lint_test:
     - pip install --no-cache-dir poetry==1.8.3
   script:
     - make install
-    - make lint
-    - make test
+    # `make ci` = format-check + lint + test: exactamente lo mismo que se
+    # corre en local (antes solo lint + test, y el formato no se validaba).
+    - make ci
   rules:
     - if: $CI_COMMIT_BRANCH
 

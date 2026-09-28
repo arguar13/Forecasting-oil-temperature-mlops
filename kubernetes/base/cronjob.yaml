@@ -22,10 +22,19 @@ spec:
         spec:
           serviceAccountName: dlinear-sa  # El acceso a S3 lo da el rol de IAM del node group (ver terraform/eks.tf)
           restartPolicy: OnFailure
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001  # mismo UID que crea el Dockerfile
+            seccompProfile:
+              type: RuntimeDefault
           containers:
           - name: dlinear-batch-container
             image: dlinear-api:base
             command: ["python", "-m", "src.batch_inference"]
+            securityContext:
+              allowPrivilegeEscalation: false
+              capabilities:
+                drop: ["ALL"]
             envFrom:
             - configMapRef:
                 name: dlinear-config

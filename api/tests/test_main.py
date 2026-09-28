@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 from fastapi.testclient import TestClient
@@ -143,3 +145,36 @@ def test_load_model_resilient_is_configured_with_bounded_retries_and_breaker():
 
     assert main_module.MODEL_REGISTRY_BREAKER.fail_max == 5
     assert main_module.MODEL_REGISTRY_BREAKER.reset_timeout == 60
+
+
+def test_predict_returns_500_without_leaking_internal_errors(monkeypatch):
+    import api.main as main_module
+
+    class _BrokenModel:
+        def predict(self, model_input):
+            raise RuntimeError("secret internal detail")
+
+    monkeypatch.setattr(main_module, "load_model", lambda uri: _BrokenModel())
+
+    with TestClient(main_module.app) as test_client:
+        response = test_client.post("/predict", json={"features": _valid_features()})
+
+    assert response.status_code == 500
+    assert "secret internal detail" not in response.text
+
+
+def test_model_with_mismatched_seq_len_is_never_marked_ready(monkeypatch):
+    """Un modelo reentrenado con otro seq_len no debe pasar /ready: cada
+    /predict fallaría contra el contrato HTTP de 48 lecturas."""
+    import api.main as main_module
+
+    class _OtherWindowModel(_FakePyfuncModel):
+        metadata = SimpleNamespace(
+            flavors={"python_function": {"model_config": {"seq_len": 96, "n_features": 10}}}
+        )
+
+    monkeypatch.setattr(main_module, "load_model", lambda uri: _OtherWindowModel())
+
+    with TestClient(main_module.app) as test_client:
+        assert test_client.get("/ready").status_code == 503
+        assert test_client.get("/health").status_code == 200

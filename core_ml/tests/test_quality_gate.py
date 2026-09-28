@@ -17,9 +17,11 @@ def mlflow_local_registry(tmp_path):
     yield
 
 
-def _log_and_register(model_name: str, metric_value: float) -> str:
+def _log_and_register(model_name: str, metric_value: float, **params) -> str:
     with mlflow.start_run():
         mlflow.log_metric("final_test_mse", metric_value)
+        if params:
+            mlflow.log_params(params)
         info = mlflow.pyfunc.log_model(
             artifact_path="model",
             python_model=_DummyModel(),
@@ -81,3 +83,46 @@ def test_equal_metric_still_promotes(mlflow_local_registry):
 def test_no_registered_versions_raises(mlflow_local_registry):
     with pytest.raises(SystemExit, match="No hay ninguna versión"):
         run_quality_gate("nonexistent-model")
+
+
+def _production_version(model_name: str) -> str:
+    client = mlflow.MlflowClient()
+    return str(client.get_model_version_by_alias(model_name, "production").version)
+
+
+REAL = {"dataset": "raw", "seq_len": 48, "pred_len": 48}
+TOY = {"dataset": "toy", "seq_len": 48, "pred_len": 48}
+
+
+def test_toy_candidate_never_replaces_a_real_production_model(mlflow_local_registry):
+    _log_and_register("guarded-model", metric_value=5.0, **REAL)
+    run_quality_gate("guarded-model")
+
+    # Mejor métrica, pero medida sobre el split de test del dataset toy.
+    _log_and_register("guarded-model", metric_value=0.1, **TOY)
+    promoted = run_quality_gate("guarded-model")
+
+    assert promoted is False
+    assert _production_version("guarded-model") == "1"
+
+
+def test_real_candidate_replaces_a_toy_production_model(mlflow_local_registry):
+    _log_and_register("smoke-model", metric_value=0.1, **TOY)
+    run_quality_gate("smoke-model")
+
+    _log_and_register("smoke-model", metric_value=5.0, **REAL)
+    promoted = run_quality_gate("smoke-model")
+
+    assert promoted is True
+    assert _production_version("smoke-model") == "2"
+
+
+def test_candidate_with_a_different_horizon_is_not_comparable(mlflow_local_registry):
+    _log_and_register("horizon-model", metric_value=5.0, **REAL)
+    run_quality_gate("horizon-model")
+
+    _log_and_register("horizon-model", metric_value=0.1, **{**REAL, "pred_len": 1})
+    promoted = run_quality_gate("horizon-model")
+
+    assert promoted is False
+    assert _production_version("horizon-model") == "1"

@@ -22,7 +22,7 @@ ECR_REGISTRY     := $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com
 .PHONY: help install install-api install-core-ml install-core-ml-ci lock \
 	format format-check lint type-check test \
 	hooks pre-commit-run ci clean \
-	dvc-pull dvc-push dvc-status data-toy data-raw train train-toy quality-gate mlflow-ui \
+	dvc-pull dvc-push dvc-status data-download data-toy data-raw train train-toy quality-gate mlflow-ui \
 	up down restart logs ps \
 	docker-build docker-push deploy \
 	tf-fmt tf-validate tf-plan tf-apply k8s-build
@@ -99,6 +99,9 @@ dvc-push: ## Sube los datasets versionados al remoto S3/LocalStack
 
 dvc-status: ## Muestra si los datasets locales están al día con el remoto
 	cd $(CORE_DIR) && poetry run dvc status -c
+
+data-download: ## Descarga ETTh1 del repo público y genera el toy (alternativa a dvc-pull sin remoto)
+	cd $(CORE_DIR) && poetry run python -m scripts.download_data
 
 data-toy: ## Procesa el dataset toy (~1000 filas) para un ciclo E2E rápido
 	cd $(CORE_DIR) && poetry run python -m src.data_processing --dataset toy --output_dir artifacts_toy

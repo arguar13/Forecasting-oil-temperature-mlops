@@ -1,4 +1,5 @@
 import argparse
+import copy
 import os
 import random
 
@@ -21,7 +22,9 @@ logger = get_logger(__name__)
 
 # Configuración del dispositivo (GPU o CPU)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-torch.backends.cudnn.benchmark = True
+# benchmark=False: cudnn.benchmark elige kernels por timing en cada corrida,
+# lo que rompe la reproducibilidad que busca la semilla fija de abajo.
+torch.backends.cudnn.benchmark = False
 
 # Sin esto, dos corridas con el MISMO lr (init de pesos vía torch, shuffling
 # del DataLoader de train, y la propia búsqueda de Optuna) producían
@@ -175,7 +178,13 @@ class ModelTrainer:
             # Early Stopping
             if val_mean < best_val_loss:
                 best_val_loss, no_improve = val_mean, 0
-                best_state = model.state_dict()
+                # deepcopy: state_dict() devuelve REFERENCIAS a los tensores
+                # vivos del modelo, no una copia -- sin esto, best_state
+                # seguiría mutando con cada optimizer.step() y el "mejor
+                # checkpoint" restaurado sería en realidad el de la última
+                # época (early stopping sin efecto, y final_val_mse
+                # describiendo pesos distintos a los que se registran).
+                best_state = copy.deepcopy(model.state_dict())
                 estado = "[Guardado]"
             else:
                 no_improve += 1
@@ -247,17 +256,17 @@ class ModelTrainer:
         mae = float(np.mean(np.abs(errors)))
         rmse = float(np.sqrt(mse))
 
-        # MAPE divide por targets_original, y la temperatura de aceite puede
-        # acercarse a cero (no hay garantía física de que "cerca de cero" sea
-        # raro en este dataset, a diferencia de, por ejemplo, un precio). Un
-        # epsilon evita un ZeroDivisionError/inf silencioso, pero el número
-        # resultante hay que leerlo con cautela si una parte relevante de
-        # los targets del holdout está cerca de cero -- MAPE asume
-        # implícitamente que eso no pasa, y aquí no está garantizado.
-        epsilon = 1e-3
-        mape = float(np.mean(np.abs(errors) / np.maximum(np.abs(targets_original), epsilon)) * 100)
+        # WAPE (sum|error| / sum|real|), no MAPE: la temperatura de aceite del
+        # split de test de ETTh1 cruza cero, y MAPE divide punto a punto por
+        # el valor real -- en una corrida real dio ~2860%, un número sin
+        # sentido dominado por unas pocas lecturas cercanas a 0 °C. WAPE
+        # agrega antes de dividir, así que un target puntual cercano a cero
+        # no lo hace explotar. El epsilon solo cubre el caso degenerado de
+        # un holdout cuyos targets suman exactamente cero.
+        epsilon = 1e-8
+        wape = float(np.sum(np.abs(errors)) / max(np.sum(np.abs(targets_original)), epsilon) * 100)
 
-        return {"test_mse": mse, "test_mae": mae, "test_rmse": rmse, "test_mape": mape}
+        return {"test_mse": mse, "test_mae": mae, "test_rmse": rmse, "test_wape": wape}
 
 
 if __name__ == "__main__":
@@ -270,14 +279,10 @@ if __name__ == "__main__":
     # hasta `epochs` (25) con early stopping -- un lr que luce razonable en
     # ese proxy de 2 épocas puede necesitar más de 25 épocas para converger
     # de verdad. Con solo 3 trials, quality_gate rechazó un candidato real
-    # (dlinear-ett-forecaster v3, run de train_model en CI) porque Optuna
-    # eligió lr=0.00031 -- muy por debajo de los lr=0.0065/0.0017 de las
-    # otras dos corridas que sí convergieron bien en el mismo presupuesto de
-    # 25 épocas (final_val_mse: 0.026 vs ~0.005-0.007). Sin semilla fija
-    # (torch.manual_seed/np.random.seed no se setean en este módulo), cada
-    # corrida de Optuna explora puntos distintos -- más trials no eliminan
-    # la varianza, pero sí bajan la probabilidad de terminar con el peor
-    # candidato de la búsqueda.
+    # porque Optuna eligió un lr demasiado bajo para ese presupuesto de
+    # épocas. La semilla fija (SEED, arriba) hace que la búsqueda sea
+    # reproducible, pero no mejor: más trials bajan la probabilidad de
+    # quedarse con un lr malo del espacio de búsqueda.
     parser.add_argument("--n_trials", type=int, default=5)
     parser.add_argument(
         "--dataset",
@@ -328,7 +333,7 @@ if __name__ == "__main__":
                 "final_test_mse": test_metrics["test_mse"],
                 "final_test_mae": test_metrics["test_mae"],
                 "final_test_rmse": test_metrics["test_rmse"],
-                "final_test_mape": test_metrics["test_mape"],
+                "final_test_wape": test_metrics["test_wape"],
             }
         )
         logger.info(
@@ -336,7 +341,7 @@ if __name__ == "__main__":
             test_mse=test_metrics["test_mse"],
             test_mae=test_metrics["test_mae"],
             test_rmse=test_metrics["test_rmse"],
-            test_mape=test_metrics["test_mape"],
+            test_wape=test_metrics["test_wape"],
         )
 
         # Complete the reference profile data_processing.py started (raw

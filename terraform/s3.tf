@@ -3,8 +3,9 @@
 # `terraform output` a los manifiestos de K8s") cada vez que se recree el
 # bucket -- exactamente el tipo de mutación frágil que este enfoque evita.
 # Con el Account ID, el nombre es conocido de antemano por Terraform *y*
-# por el ConfigMap de Kustomize (kubernetes/base/configmap.yaml) sin
-# necesidad de pasarse valores en runtime.
+# por el ConfigMap que genera Kustomize (MODEL_BUCKET_NAME en
+# kubernetes/overlays/production/kustomization.yaml) sin necesidad de
+# pasarse valores en runtime.
 resource "aws_s3_bucket" "model_artifacts" {
   bucket = "${var.project_name}-model-artifacts-${data.aws_caller_identity.current.account_id}"
 
@@ -40,6 +41,6 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "model_artifacts" 
 }
 
 output "model_artifacts_bucket_name" {
-  description = "Nombre determinístico del bucket -- referenciado por kubernetes/base/configmap.yaml"
+  description = "Nombre determinístico del bucket -- referenciado por kubernetes/overlays/production/kustomization.yaml (MODEL_BUCKET_NAME)"
   value       = aws_s3_bucket.model_artifacts.bucket
 }

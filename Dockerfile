@@ -4,7 +4,9 @@ FROM python:3.10-slim
 WORKDIR /app
 
 ENV POETRY_VERSION=1.8.3 \
-    POETRY_VIRTUALENVS_CREATE=false
+    POETRY_VIRTUALENVS_CREATE=false \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
 
 RUN pip install --no-cache-dir "poetry==$POETRY_VERSION" "poetry-plugin-export==1.8.0"
 
@@ -48,6 +50,12 @@ COPY core_ml/src/data_contracts.py ./src/data_contracts.py
 COPY core_ml/src/logging_config.py ./src/logging_config.py
 COPY core_ml/src/batch_inference.py ./src/batch_inference.py
 COPY core_ml/src/monitoring/ ./src/monitoring/
+
+# Usuario sin privilegios (UID numérico: permite que Kubernetes verifique
+# `runAsNonRoot: true`, ver kubernetes/base/deployment.yaml). MLflow
+# descarga el modelo a un directorio temporal/HOME, ambos escribibles.
+RUN useradd --uid 10001 --create-home --shell /usr/sbin/nologin appuser
+USER 10001
 
 EXPOSE 8000
 CMD ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"]
