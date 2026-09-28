@@ -18,14 +18,20 @@ AWS_ACCOUNT_ID   ?=
 ECR_REPOSITORY   ?= dlinear-forecast-api
 IMAGE_TAG        ?= $(shell git rev-parse HEAD)
 ECR_REGISTRY     := $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com
+# SHA del host inyectado al contenedor trainer (que no ve .git): queda como
+# tag git_commit_hash de cada run de MLflow (ver mlflow_utils.get_git_commit_hash).
+GIT_SHA          := $(shell git rev-parse HEAD 2>/dev/null)
+TRAINER_RUN      := docker compose run --rm -e GIT_COMMIT_SHA=$(GIT_SHA) trainer
+# Bucket que crea localstack/init/01-bootstrap.sh (solo stack local).
+LOCAL_BUCKET     := mlops-portafolio-proj3-models
 
 .PHONY: help install install-api install-core-ml install-core-ml-ci lock \
 	format format-check lint type-check test \
 	hooks pre-commit-run ci clean \
-	dvc-pull dvc-push dvc-status data-download data-toy data-raw train train-toy quality-gate mlflow-ui \
-	up down restart logs ps \
+	dvc-pull dvc-push dvc-status data-download data-toy data-raw train train-toy quality-gate reload-api batch-local mlflow-ui \
+	up down restart reset-local logs ps \
 	docker-build docker-push deploy \
-	tf-fmt tf-validate tf-plan tf-apply k8s-build
+	tf-fmt tf-validate tf-test tf-plan tf-apply k8s-build
 
 help: ## Muestra esta ayuda
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-22s\033[0m %s\n", $$1, $$2}'
@@ -114,13 +120,29 @@ data-raw: ## Procesa el dataset completo de producción
 # de cada artefacto con el separador del SO que entrena; entrenar en Windows
 # graba rutas que el contenedor de la API (Linux) no puede resolver.
 train-toy: data-toy ## Entrena end-to-end sobre el dataset toy en segundos (smoke test, sin GPU)
-	docker compose run --rm trainer python -m src.train --dataset toy --artifact_dir artifacts_toy --epochs 2 --n_trials 1
+	$(TRAINER_RUN) python -m src.train --dataset toy --artifact_dir artifacts_toy --epochs 2 --n_trials 1
 
 train: data-raw ## Entrena end-to-end sobre el dataset completo de producción
-	docker compose run --rm trainer python -m src.train --dataset raw
+	$(TRAINER_RUN) python -m src.train --dataset raw
 
 quality-gate: ## Evalúa el quality gate y promueve a producción si corresponde
-	docker compose run --rm trainer python -m src.quality_gate
+	$(TRAINER_RUN) python -m src.quality_gate
+
+# La API carga el modelo una sola vez, al arrancar (lifespan): tras una
+# promoción hay que reiniciarla para que sirva la nueva versión de production.
+reload-api: ## Reinicia la API local para que cargue el modelo "production" actual
+	docker compose restart api
+	docker compose up -d --wait api
+
+# Mismo entrypoint y misma imagen que el CronJob de Kubernetes
+# (kubernetes/base/cronjob.yaml), contra el bucket de LocalStack.
+batch-local: ## Corre el batch scoring (src.batch_inference) en local contra LocalStack
+	cd $(CORE_DIR) && poetry run python -m scripts.make_batch_input --output artifacts_batch/input_data.csv
+	docker compose cp $(CORE_DIR)/artifacts_batch/input_data.csv localstack:/tmp/input_data.csv
+	docker compose exec -T localstack awslocal s3 cp /tmp/input_data.csv s3://$(LOCAL_BUCKET)/batch/input_data.csv
+	docker compose run --rm --no-deps -e AWS_ENDPOINT_URL=http://localstack:4566 \
+		-e MODEL_BUCKET_NAME=$(LOCAL_BUCKET) api python -m src.batch_inference
+	docker compose exec -T localstack awslocal s3 cp s3://$(LOCAL_BUCKET)/batch/predictions_output.csv - | head -n 3
 
 mlflow-ui: ## Levanta la UI local de MLflow sobre ./core_ml/mlruns (http://localhost:5000)
 	cd $(CORE_DIR) && poetry run mlflow ui --backend-store-uri ./mlruns
@@ -136,6 +158,13 @@ down: ## Detiene y elimina el stack local (conserva los volúmenes de datos)
 	docker compose down
 
 restart: down up ## Reinicia el stack local completo
+
+# LocalStack Community no persiste S3 pero Postgres sí: tras reiniciar
+# LocalStack, MLflow listaría runs cuyos artefactos ya no existen. Esto
+# borra ambos volúmenes para volver a un estado coherente (luego reentrenar).
+reset-local: ## Borra el stack local Y sus volúmenes (MLflow + S3 simulado) y lo levanta limpio
+	docker compose down -v
+	$(MAKE) up
 
 logs: ## Sigue los logs de todos los servicios del stack local
 	docker compose logs -f
@@ -167,6 +196,9 @@ tf-fmt: ## Verifica el formato de Terraform (sin credenciales AWS)
 tf-validate: ## Valida sintaxis y consistencia interna de Terraform (init local, sin backend remoto ni AWS)
 	terraform -chdir=terraform init -backend=false -input=false
 	terraform -chdir=terraform validate
+
+tf-test: tf-validate ## Tests de Terraform con providers mockeados (offline, sin credenciales AWS)
+	terraform -chdir=terraform test
 
 tf-plan: ## Muestra los cambios que aplicaría Terraform (requiere credenciales AWS)
 	terraform -chdir=terraform plan

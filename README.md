@@ -213,10 +213,10 @@ Once the stack is up:
 
 `make down` stops the stack (data volumes are preserved). `make logs` /
 `make ps` follow logs and check the state of each service. Note that
-LocalStack Community does not persist S3 state across container
-recreation, while Postgres does: after a `make down`, MLflow still lists
-older runs whose artifacts are gone, so retrain (`make train-toy` or
-`make train`) before serving.
+LocalStack Community does not persist S3 state — not even across a plain
+container restart — while Postgres does: afterwards MLflow still lists
+runs whose artifacts are gone. `make reset-local` wipes both volumes and
+brings the stack back up clean; then retrain.
 
 ## Training a model
 
@@ -230,7 +230,18 @@ make train
 # Compare the newly trained model against the current "production" one,
 # and promote it if it's at least as good
 make quality-gate
+
+# The API loads the model once, at startup: restart it to serve the newly
+# promoted version
+make reload-api
+
+# Run the batch scoring job (same image and entrypoint as the Kubernetes
+# CronJob) against LocalStack
+make batch-local
 ```
+
+The API stays alive but answers `/ready` and `/predict` with 503 until a
+`production` version exists and it has been (re)loaded.
 
 Training runs inside the `trainer` container (`core_ml/train.Dockerfile`)
 so that file paths recorded by MLflow are consistent regardless of the
@@ -311,6 +322,15 @@ the ECR repository, and the IAM roles the pipeline needs — including the
 OIDC trust relationship that lets GitLab CI assume an AWS role without a
 stored access key. `db_password` has no default on purpose — never commit
 a database password to Git.
+
+The RDS instance is created with `storage_encrypted = true`. RDS cannot
+toggle encryption in place (changing it destroys and recreates the
+instance), so `terraform/rds.tf` ignores that attribute after creation: an
+instance created unencrypted before this setting existed is **not**
+replaced. To encrypt such an instance without losing MLflow's backend
+store: take a snapshot, copy it with encryption enabled, and restore the
+instance from the encrypted copy. `make tf-test` checks this contract
+offline, with mocked providers and no AWS credentials.
 
 ```bash
 # 2. One-time manual setup per cluster (not managed by Terraform or Git):

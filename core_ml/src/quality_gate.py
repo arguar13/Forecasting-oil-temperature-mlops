@@ -124,7 +124,13 @@ def run_quality_gate(model_name: str, metric_key: str = DEFAULT_METRIC_KEY) -> b
         # Caso inverso: producción solo tiene un modelo de humo; cualquier
         # modelo entrenado con datos reales pasa a ser la nueva línea base.
         return _promote(
-            client, model_name, candidate, production, metric_key, candidate_metric, None
+            client,
+            model_name,
+            candidate,
+            production,
+            metric_key,
+            candidate_metric,
+            production_metric,
         )
 
     mismatched = {

@@ -44,10 +44,14 @@ def get_git_commit_hash() -> str:
     Prioriza `CI_COMMIT_SHA` (inyectado por GitLab CI) para que el hash
     registrado sea el del commit que efectivamente disparó el pipeline,
     incluso si el working tree de CI está en un estado detached/shallow.
+    Luego `GIT_COMMIT_SHA`: el contenedor `trainer` de docker-compose solo
+    monta core_ml/ (sin .git) y no trae git instalado, así que el Makefile
+    le inyecta el SHA del host -- sin esto, todo modelo entrenado en local
+    quedaba registrado con git_commit_hash="unknown".
     """
-    ci_sha = os.getenv("CI_COMMIT_SHA")
-    if ci_sha:
-        return ci_sha
+    injected_sha = os.getenv("CI_COMMIT_SHA") or os.getenv("GIT_COMMIT_SHA")
+    if injected_sha:
+        return injected_sha
     try:
         # Lista de argumentos fija (sin shell=True, sin input de usuario
         # interpolado); "git" se resuelve vía PATH a propósito para

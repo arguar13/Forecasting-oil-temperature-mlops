@@ -34,12 +34,12 @@ services:
       DEFAULT_REGION: us-east-1
       AWS_ACCESS_KEY_ID: test
       AWS_SECRET_ACCESS_KEY: test  # pragma: allowlist secret -- credencial fija de LocalStack, nunca se usa fuera del stack local
-      # Ojo: la persistencia de LocalStack es una función de la edición de
-      # pago; en la Community el estado de S3 (artefactos de MLflow, remoto
-      # DVC) se pierde al recrear el contenedor, mientras Postgres (volumen
-      # pgdata) conserva los runs/versiones que apuntan a ellos. Tras un
-      # `make down`, reentrenar (`make train-toy` o `make train`).
-      PERSISTENCE: 1
+      # Sin PERSISTENCE: es una función de la edición de pago y la Community
+      # la ignora (verificado: tras un simple `docker compose restart
+      # localstack` el bucket queda vacío). El estado de S3 (artefactos de
+      # MLflow, remoto DVC) vive solo mientras vive el contenedor, mientras
+      # Postgres (volumen pgdata) sí conserva los runs que apuntan a él --
+      # tras reiniciar LocalStack, `make reset-local` + reentrenar.
     ports:
       - "4566:4566"
     volumes:
@@ -120,19 +120,20 @@ services:
     build:
       context: .
       dockerfile: core_ml/train.Dockerfile
+    # Solo el código se monta; las dependencias ya vienen horneadas en la
+    # imagen (ver core_ml/train.Dockerfile).
     volumes:
       - ./core_ml:/workspace
-      # "pip install -r requirements.txt" corre en cada `docker compose run`
-      # (ver train-entrypoint.sh) -- cachear aquí evita re-descargar ~2GB de
-      # wheels (torch, cuda) en cada invocación; solo la primera corrida es
-      # lenta.
-      - trainer_pip_cache:/root/.cache/pip
     environment:
       MLFLOW_TRACKING_URI: http://mlflow:5000
       AWS_ACCESS_KEY_ID: test
       AWS_SECRET_ACCESS_KEY: test  # pragma: allowlist secret -- credencial fija de LocalStack, nunca se usa fuera del stack local
       AWS_DEFAULT_REGION: us-east-1
       MLFLOW_S3_ENDPOINT_URL: http://localstack:4566
+      # Sin .git ni binario git en este contenedor: el commit llega por
+      # GIT_COMMIT_SHA (Makefile::TRAINER_RUN); esto silencia el aviso de
+      # GitPython que MLflow emite al no encontrar git.
+      GIT_PYTHON_REFRESH: quiet
     depends_on:
       mlflow:
         condition: service_healthy
@@ -140,4 +141,3 @@ services:
 volumes:
   pgdata:
   localstack_data:
-  trainer_pip_cache:

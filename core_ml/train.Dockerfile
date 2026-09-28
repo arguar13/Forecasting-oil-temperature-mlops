@@ -8,30 +8,35 @@
 # Entrenar directo en el host Windows (`poetry run python -m src.train`)
 # graba "artifacts\dlinear_model.pth"; el contenedor de la API (Linux)
 # busca "artifacts/dlinear_model.pth" y falla con FileNotFoundError.
-# CI ya entrena dentro de `image: python:3.10` (.gitlab-ci.yml::train_model)
+# CI ya entrena dentro de `image: python:3.10` (.gitlab-ci.yml::train)
 # -- esta imagen replica ese mismo entorno para desarrollo local, sea cual
 # sea el SO del host.
 FROM python:3.10-slim
 
 WORKDIR /workspace
 
-ENV PYTHONUTF8=1
+ENV PYTHONUTF8=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
 
-# Solo para exportar el lockfile a requirements.txt (ver train-entrypoint.sh)
-# -- NO se usa "poetry install" en esta imagen. En este entorno concreto
-# (Docker Desktop/WSL2, python:3.10-slim), `poetry install` con el lockfile
-# de core_ml muere de forma silenciosa y 100 % reproducible (exit 1, cero
-# traza incluso con -vvv) justo al entrar a la fase de resolución de entorno
-# de "virtualenv" ("[virtualenv:virtualenv.app_data] created app data
-# folder..." es la última línea que llega a imprimir) -- se probó con/sin
-# instalador paralelo, con/sin BuildKit, con PYTHON_KEYRING_BACKEND=null;
-# nada lo evita. "poetry export" (no toca esa ruta de código, no resuelve
-# ni crea ningún entorno) sí funciona limpio -- se usa para generar un
-# requirements.txt pineado desde el lockfile, y las dependencias reales se
-# instalan con pip, no con el instalador de poetry.
-RUN pip install --no-cache-dir "poetry==1.8.3" "poetry-plugin-export==1.8.0"
+# Dependencias horneadas en la imagen, no instaladas en cada arranque: antes
+# un entrypoint corría `pip install` en cada `docker compose run`, y cada
+# `make train`/`train-toy`/`quality-gate` pagaba varios minutos de
+# instalación. Esta capa solo se reconstruye cuando cambia el lockfile
+# (`docker compose build trainer`, o automático vía `make up`).
+#
+# "poetry export" + pip, no "poetry install": en este entorno (Docker
+# Desktop/WSL2, python:3.10-slim), `poetry install` con el lockfile de
+# core_ml muere en silencio (exit 1, sin traza) al resolver el entorno de
+# virtualenv; "poetry export" no toca esa ruta de código. --timeout 120
+# (default de pip: 15s) da margen para bajar torch en un host con red
+# compartida.
+COPY core_ml/pyproject.toml core_ml/poetry.lock /tmp/deps/
+RUN pip install --no-cache-dir "poetry==1.8.3" "poetry-plugin-export==1.8.0" \
+    && poetry export -C /tmp/deps -f requirements.txt --without-hashes --only main -o /tmp/deps/requirements.txt \
+    && pip install --no-cache-dir --timeout 120 -r /tmp/deps/requirements.txt \
+    && pip uninstall -y poetry poetry-plugin-export \
+    && rm -rf /tmp/deps
 
-COPY core_ml/train-entrypoint.sh /usr/local/bin/train-entrypoint.sh
-RUN chmod +x /usr/local/bin/train-entrypoint.sh
-
-ENTRYPOINT ["/usr/local/bin/train-entrypoint.sh"]
+# El código (core_ml/) llega por bind mount (docker-compose.yml), así que
+# no hace falta reconstruir la imagen al editar src/.

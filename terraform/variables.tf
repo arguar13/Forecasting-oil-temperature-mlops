@@ -25,6 +25,12 @@ variable "db_password" {
   sensitive   = true
 }
 
+variable "db_storage_encrypted" {
+  description = "Cifrado en reposo del RDS de MLflow. Solo tiene efecto al CREAR la instancia (ver lifecycle.ignore_changes en rds.tf)"
+  type        = bool
+  default     = true
+}
+
 variable "gitlab_project_path" {
   description = "Ruta del proyecto en GitLab (namespace/proyecto), usada en el trust policy OIDC de GitLabCI_OIDC_Role"
   type        = string

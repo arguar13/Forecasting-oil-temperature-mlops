@@ -41,7 +41,18 @@ resource "aws_db_instance" "mlflow_db" {
   multi_az               = false
   # Cifrado en reposo (KMS administrado por AWS, sin costo extra): el
   # backend store de MLflow guarda parámetros, métricas y metadata de runs.
-  storage_encrypted = true
+  storage_encrypted = var.db_storage_encrypted
+
+  lifecycle {
+    # RDS no permite cambiar storage_encrypted in-place: cambiarlo fuerza
+    # destruir y recrear la instancia, y con skip_final_snapshot = true eso
+    # borra todo el backend de MLflow sin snapshot. Se ignora tras la
+    # creación: una instancia nueva nace cifrada, y una ya existente sin
+    # cifrar NO se reemplaza al aplicar este cambio. Para cifrar una
+    # existente (sin pérdida): snapshot -> copiarlo cifrado -> restaurar
+    # desde la copia (README, sección "Desplegar en AWS").
+    ignore_changes = [storage_encrypted]
+  }
 }
 
 output "rds_endpoint" {

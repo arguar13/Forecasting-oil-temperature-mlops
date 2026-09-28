@@ -29,8 +29,17 @@ def test_get_git_commit_hash_prefers_ci_env_var(monkeypatch):
     assert get_git_commit_hash() == "abc123"
 
 
+def test_get_git_commit_hash_uses_injected_sha_outside_ci(monkeypatch):
+    # Contenedor trainer local: sin .git, el Makefile inyecta GIT_COMMIT_SHA.
+    monkeypatch.delenv("CI_COMMIT_SHA", raising=False)
+    monkeypatch.setenv("GIT_COMMIT_SHA", "sha-from-host")
+
+    assert get_git_commit_hash() == "sha-from-host"
+
+
 def test_get_git_commit_hash_falls_back_to_git(monkeypatch):
     monkeypatch.delenv("CI_COMMIT_SHA", raising=False)
+    monkeypatch.delenv("GIT_COMMIT_SHA", raising=False)
 
     result = get_git_commit_hash()
 

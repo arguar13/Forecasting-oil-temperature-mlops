@@ -221,10 +221,11 @@ Con el stack levantado:
 
 `make down` detiene el stack (conserva los volúmenes de datos). `make
 logs` y `make ps` siguen los logs y muestran el estado de cada servicio.
-Ojo: LocalStack Community no persiste el estado de S3 al recrear el
-contenedor, pero Postgres sí: tras un `make down`, MLflow sigue listando
-runs cuyos artefactos ya no existen, así que hay que reentrenar (`make
-train-toy` o `make train`) antes de servir.
+Ojo: LocalStack Community no persiste el estado de S3 -- ni siquiera
+ante un simple reinicio del contenedor --, pero Postgres sí: después,
+MLflow sigue listando runs cuyos artefactos ya no existen. `make
+reset-local` borra ambos volúmenes y levanta el stack limpio; luego hay
+que reentrenar.
 
 ## Entrenar un modelo
 
@@ -238,7 +239,18 @@ make train
 # Compara el modelo recién entrenado contra el actual "production", y lo
 # promueve si es al menos igual de bueno
 make quality-gate
+
+# La API carga el modelo una sola vez, al arrancar: reiniciarla para que
+# sirva la versión recién promovida
+make reload-api
+
+# Corre el batch scoring (misma imagen y entrypoint que el CronJob de
+# Kubernetes) contra LocalStack
+make batch-local
 ```
+
+La API sigue viva pero responde `/ready` y `/predict` con 503 hasta que
+exista una versión `production` y se haya (re)cargado.
 
 El entrenamiento corre dentro del contenedor `trainer`
 (`core_ml/train.Dockerfile`) para que las rutas de archivo que registra
@@ -324,6 +336,15 @@ repositorio ECR, y los roles de IAM que necesita el pipeline -- incluida
 la relación de confianza OIDC que le permite a GitLab CI asumir un rol de
 AWS sin una access key guardada. `db_password` no tiene default a
 propósito -- nunca comitees una contraseña de base de datos a Git.
+
+La instancia RDS se crea con `storage_encrypted = true`. RDS no permite
+activar el cifrado in-place (cambiarlo destruye y recrea la instancia), así
+que `terraform/rds.tf` ignora ese atributo tras la creación: una instancia
+creada sin cifrar antes de este ajuste **no** se reemplaza. Para cifrarla
+sin perder el backend store de MLflow: sacar un snapshot, copiarlo con
+cifrado activado y restaurar la instancia desde esa copia cifrada. `make
+tf-test` verifica este contrato offline, con providers mockeados y sin
+credenciales AWS.
 
 ```bash
 # 2. Configuración manual, una sola vez por cluster (no la gestiona
