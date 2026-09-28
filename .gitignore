@@ -93,3 +93,7 @@ GUIA_EJECUCION_PROYECTO*
 # con docker-compose.yml): no es una fuente de verdad del proyecto, solo
 # evita colisiones de puertos con otros stacks corriendo en un equipo dado.
 docker-compose.override.yml
+
+# Borrador del post de portafolio (WordPress), imágenes y portada: no
+# forman parte del repositorio.
+blog/

@@ -1,11 +1,18 @@
 """Quality Gate para el Model Registry de MLflow.
 
 Promueve la última versión registrada de un modelo al alias `production`
-SOLO si su métrica de test mejora (o iguala) a la versión actualmente en
-`production`, y solo si ambas métricas son comparables (mismo dataset,
-seq_len y pred_len -- ver COMPARABILITY_PARAMS). Si no la supera, el script termina con código de salida
-distinto de cero -- en CI eso bloquea el resto del pipeline (deploy), así
-que un modelo peor nunca reemplaza al que está sirviendo tráfico real.
+SOLO si cumple dos condiciones:
+
+1. Le gana a la línea base ingenua (persistencia: repetir la última lectura)
+   sobre el mismo split de test -- también la primera versión. Un modelo que
+   no mejora a "no hacer nada" no justifica su costo de operación.
+2. Su métrica de test mejora (o iguala) a la versión actualmente en
+   `production`, y ambas son comparables (mismo dataset, seq_len y pred_len
+   -- ver COMPARABILITY_PARAMS).
+
+Si no las cumple, el script termina con código de salida distinto de cero --
+en CI eso bloquea el resto del pipeline (deploy), así que un modelo peor
+nunca reemplaza al que está sirviendo tráfico real.
 
 Usa el sistema de "aliases" del Model Registry (no el de `stages`,
 deprecado desde MLflow 2.9) como fuente de verdad de "cuál versión sirve
@@ -35,6 +42,9 @@ PRODUCTION_ALIAS = "production"
 # puede "verse bien" en val precisamente porque el proceso de selección lo
 # empujó ahí. test nunca influyó en nada de eso.
 DEFAULT_METRIC_KEY = "final_test_mse"  # menor es mejor (MSE de test, en °C^2)
+# train.py loguea, para cada métrica de test, la misma métrica de la línea
+# base de persistencia con este sufijo (final_test_mse_persistence).
+BASELINE_METRIC_SUFFIX = "_persistence"
 
 
 def _latest_version(client: MlflowClient, model_name: str) -> ModelVersion:
@@ -81,6 +91,31 @@ def run_quality_gate(model_name: str, metric_key: str = DEFAULT_METRIC_KEY) -> b
             f"La versión candidata v{candidate.version} de '{model_name}' no tiene "
             f"la métrica '{metric_key}' logueada; no se puede evaluar el quality gate."
         )
+
+    # Vara mínima, antes de mirar producción: un candidato entrenado con datos
+    # reales tiene que ganarle a la persistencia en su propio split de test.
+    # El toy queda exento: su test (~100 ventanas) existe para ejercitar la
+    # plomería del pipeline, no para medir skill, y nunca puede reemplazar a
+    # un modelo real (ver más abajo).
+    if candidate_params.get("dataset") != SMOKE_TEST_DATASET:
+        baseline_key = metric_key + BASELINE_METRIC_SUFFIX
+        baseline_metric, _ = _metric_for_version(client, candidate, baseline_key)
+        if baseline_metric is None:
+            raise SystemExit(
+                f"La versión candidata v{candidate.version} de '{model_name}' no tiene "
+                f"la métrica '{baseline_key}' logueada; no se puede comparar contra la "
+                "línea base."
+            )
+        if candidate_metric >= baseline_metric:
+            logger.error(
+                "quality_gate_rejected_not_better_than_persistence",
+                model_name=model_name,
+                candidate_version=candidate.version,
+                candidate_metric=candidate_metric,
+                persistence_metric=baseline_metric,
+                metric_key=metric_key,
+            )
+            return False
 
     production = _current_production_version(client, model_name)
     if production is None:

@@ -1,6 +1,7 @@
 import mlflow
 import mlflow.pyfunc
 import pytest
+from mlflow.exceptions import MlflowException
 
 from src.quality_gate import run_quality_gate
 
@@ -17,9 +18,17 @@ def mlflow_local_registry(tmp_path):
     yield
 
 
-def _log_and_register(model_name: str, metric_value: float, **params) -> str:
+def _log_and_register(
+    model_name: str, metric_value: float, persistence_value: float | None = None, **params
+) -> str:
+    # Por defecto la persistencia queda peor que el candidato, así los tests
+    # que no son sobre la línea base ejercitan solo la comparación entre
+    # versiones.
+    if persistence_value is None:
+        persistence_value = metric_value + 1.0
     with mlflow.start_run():
         mlflow.log_metric("final_test_mse", metric_value)
+        mlflow.log_metric("final_test_mse_persistence", persistence_value)
         if params:
             mlflow.log_params(params)
         info = mlflow.pyfunc.log_model(
@@ -126,3 +135,51 @@ def test_candidate_with_a_different_horizon_is_not_comparable(mlflow_local_regis
 
     assert promoted is False
     assert _production_version("horizon-model") == "1"
+
+
+def test_first_real_version_worse_than_persistence_is_not_promoted(mlflow_local_registry):
+    # Ni siquiera como línea base: sin producción previa, igual tiene que
+    # ganarle a repetir la última lectura.
+    _log_and_register("naive-model", metric_value=6.0, persistence_value=5.9, **REAL)
+
+    promoted = run_quality_gate("naive-model")
+
+    assert promoted is False
+    client = mlflow.MlflowClient()
+    with pytest.raises(MlflowException):
+        client.get_model_version_by_alias("naive-model", "production")
+
+
+def test_candidate_tied_with_persistence_is_not_promoted(mlflow_local_registry):
+    _log_and_register("tied-baseline-model", metric_value=5.0, **REAL)
+    run_quality_gate("tied-baseline-model")
+
+    # Mejor que producción (5.0), pero exactamente igual a la persistencia.
+    _log_and_register("tied-baseline-model", metric_value=4.0, persistence_value=4.0, **REAL)
+    promoted = run_quality_gate("tied-baseline-model")
+
+    assert promoted is False
+    assert _production_version("tied-baseline-model") == "1"
+
+
+def test_toy_candidate_is_exempt_from_the_persistence_rule(mlflow_local_registry):
+    _log_and_register("toy-smoke-model", metric_value=9.0, persistence_value=8.0, **TOY)
+
+    promoted = run_quality_gate("toy-smoke-model")
+
+    assert promoted is True
+    assert _production_version("toy-smoke-model") == "1"
+
+
+def test_candidate_without_persistence_metric_raises(mlflow_local_registry):
+    with mlflow.start_run():
+        mlflow.log_metric("final_test_mse", 1.0)
+        mlflow.log_params(REAL)
+        mlflow.pyfunc.log_model(
+            artifact_path="model",
+            python_model=_DummyModel(),
+            registered_model_name="no-baseline-model",
+        )
+
+    with pytest.raises(SystemExit, match="final_test_mse_persistence"):
+        run_quality_gate("no-baseline-model")

@@ -60,7 +60,12 @@ def _reference_profile_matching(row: dict) -> ReferenceProfile:
         created_at="2024-01-01T00:00:00+00:00",
         n_rows=1000,
         features={
-            col: FeatureBaseline(mean=row[col], std=1.0)
+            col: FeatureBaseline(
+                mean=row[col],
+                std=1.0,
+                weekly_mean_low=row[col] - 1.0,
+                weekly_mean_high=row[col] + 1.0,
+            )
             for col in ("HUFL", "HULL", "MUFL", "MULL", "LUFL", "LULL", "OT")
         },
     )

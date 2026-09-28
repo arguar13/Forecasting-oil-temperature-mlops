@@ -98,11 +98,13 @@ Cada componente principal responde a una decisión de diseño concreta:
   -- una referencia inmutable y versionada, en vez de una ruta en disco
   que podría desincronizarse del código que la generó.
 - **Un quality gate se interpone entre "entrenado" y "sirviendo
-  tráfico."** `core_ml/src/quality_gate.py` compara el MSE de test de la
-  última versión registrada contra la que hoy tiene el alias `production`,
-  y solo mueve ese alias si la candidata es al menos igual de buena -- la
-  promoción es una decisión que el pipeline hace cumplir, no un efecto
-  secundario de entrenar.
+  tráfico."** `core_ml/src/quality_gate.py` exige primero que la
+  candidata le gane a una línea base ingenua de persistencia (repetir la
+  última lectura observada) sobre las mismas ventanas de test, después
+  compara su MSE de test contra la versión que hoy tiene el alias
+  `production`, y solo mueve ese alias si la candidata es al menos igual de
+  buena -- la promoción es una decisión que el pipeline hace cumplir, no un
+  efecto secundario de entrenar.
 - **Una sola imagen de contenedor, dos puntos de entrada.** La imagen que
   construye CI (`Dockerfile`) sirve `/predict` vía `uvicorn` y corre
   `python -m src.batch_inference` como CronJob de Kubernetes. Ambos
@@ -116,10 +118,11 @@ Cada componente principal responde a una decisión de diseño concreta:
   `/ready`) en vez de entrar en un crash-loop o servir resultados
   obsoletos.
 - **La detección de drift es un chequeo estadístico, no un subsistema.**
-  `core_ml/src/monitoring/drift_check.py` compara la media por sensor de
-  cada batch contra un perfil de referencia capturado al entrenar
-  (z-score, |z| > 3 marca una feature como drift) y loguea el resultado --
-  sin cola externa, sin historial persistido y sin acción automática;
+  `core_ml/src/monitoring/drift_check.py` marca un sensor cuando la media
+  del batch cae fuera de la banda p1–p99 de las medias semanales móviles
+  vistas al entrenar -- es decir, cuando el modelo estaría extrapolando --
+  y loguea el resultado: sin cola externa, sin historial persistido y sin
+  acción automática;
   decidir qué hacer ante una señal de drift es una decisión humana, no
   una heurística.
 - **La infraestructura se aprovisiona una vez, se aplica de forma
@@ -151,7 +154,7 @@ Cada componente principal responde a una decisión de diseño concreta:
 │   │   ├── quality_gate.py
 │   │   ├── batch_inference.py
 │   │   └── monitoring/
-│   │       └── drift_check.py      # chequeo de drift (z-score)
+│   │       └── drift_check.py      # chequeo de drift (banda de medias semanales de train)
 │   ├── data/                   # Datasets versionados por DVC (toy + raw)
 │   └── tests/
 ├── terraform/                  # Infraestructura AWS (VPC, EKS, RDS, S3, ECR, IAM)
@@ -258,9 +261,11 @@ MLflow sean consistentes sin importar el sistema operativo del host -- un
 modelo entrenado directo en Windows registraría rutas con backslash que el
 contenedor de servido (Linux) no puede resolver. Cada corrida fija su
 semilla para ser reproducible y loguea a MLflow: hiperparámetros, métricas
-(`final_test_mse`, `final_test_mae`, ...), el modelo + sus scalers como un
-único artefacto versionado, y un perfil de referencia (media/desvío por
-feature) que usa después el chequeo de drift.
+de test del modelo y de la línea base de persistencia (`final_test_mse`,
+`final_test_mae`, `final_test_mse_persistence`, `final_test_mae_skill`,
+...), el modelo + sus scalers como un único artefacto versionado, y un
+perfil de referencia (banda de medias semanales por sensor) que usa
+después el chequeo de drift.
 
 El pipeline mantiene los tres splits estrictamente separados: train ajusta
 los pesos, validación conduce la búsqueda de learning rate con Optuna y el
@@ -269,11 +274,19 @@ producir la métrica sobre la que decide el quality gate -- así esa métrica
 refleja generalización genuina, no un número que el propio proceso de
 selección ya optimizó de antemano.
 
-`core_ml/src/quality_gate.py` es el gate de promoción: compara la métrica
-`final_test_mse` de la última versión registrada contra la que hoy tiene
+`core_ml/src/quality_gate.py` es el gate de promoción. Su primer chequeo
+es contra una línea base ingenua: una candidata entrenada con datos reales
+tiene que tener un `final_test_mse` menor que `final_test_mse_persistence`
+-- el error de simplemente repetir la última temperatura de aceite
+observada durante todo el horizonte, medido sobre las mismas ventanas de
+test. La temperatura de aceite tiene mucha inercia, así que la persistencia
+es difícil de batir a pocas horas vista; un modelo que no le gana no
+justifica el costo de operarlo, ni siquiera como primera versión. Después
+compara el `final_test_mse` de la candidata contra la versión que hoy tiene
 el alias `production` en el MLflow Model Registry, y solo mueve ese alias
 si la nueva versión es al menos igual de buena. Si todavía no existe una
-versión `production`, la primera candidata se convierte en la línea base.
+versión `production`, la primera candidata que le gana a la persistencia se
+convierte en la línea base.
 Un modelo peor nunca se promueve, y el script termina con código de salida
 distinto de cero cuando rechaza una candidata, de forma que un pipeline de
 CI construido sobre él se detiene antes de desplegar una regresión.
@@ -283,7 +296,9 @@ deben compartir `dataset`, `seq_len` y `pred_len`; si no, sus MSE de test
 miden cosas distintas y la candidata se rechaza (promover a mano si el
 cambio de configuración es intencional). Un modelo de humo `toy` nunca
 reemplaza a uno entrenado con datos reales, y un modelo real siempre
-reemplaza a una línea base `toy`.
+reemplaza a una línea base `toy`. La corrida `toy` además queda exenta de
+la regla de persistencia: sus ~100 ventanas de test existen para ejercitar
+la plomería de punta a punta, no para medir skill.
 
 ## Inferencia por lotes y monitoreo de drift
 
@@ -304,10 +319,15 @@ Kubernetes (`kubernetes/base/cronjob.yaml`, 02:00 UTC). Cada corrida:
    resultado.
 
 El chequeo de drift en sí (`core_ml/src/monitoring/drift_check.py`) es a
-propósito una prueba estadística chica y autocontenida: estandariza la
-media de cada sensor en el batch contra la media/desvío capturados en los
-datos de entrenamiento, y marca una feature cuando ese z-score supera 3.
-No mantiene estado entre corridas y no toma ninguna acción más allá de
+propósito una prueba estadística chica y autocontenida. Las lecturas son
+fuertemente estacionales y autocorrelacionadas: un batch cubre días y el
+set de entrenamiento cubre estaciones, así que contrastar un batch contra
+toda la distribución de entrenamiento alertaría en casi cualquier semana
+normal. En cambio, el perfil de referencia guarda, por sensor, la banda
+p1–p99 de las medias semanales móviles del periodo de entrenamiento -- la
+misma escala temporal que un batch -- y marca un sensor cuando la media del
+batch cae fuera de esa banda, es decir, cuando el modelo estaría
+extrapolando. No mantiene estado entre corridas y no toma ninguna acción más allá de
 loguear -- suficiente para responder "¿este batch todavía se parece a lo
 que vio el modelo al entrenar?", dejando en manos humanas qué hacer ante
 una señal positiva. El propio `backoffLimit` y `activeDeadlineSeconds` del

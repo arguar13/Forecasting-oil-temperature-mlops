@@ -12,6 +12,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 
+from src.data_contracts import ETT_CONTRACT, FEATURE_COLUMNS
 from src.logging_config import configure_logging, get_logger
 from src.mlflow_utils import build_reproducibility_tags, log_and_register_model
 from src.model_architecture import DLinear
@@ -43,6 +44,9 @@ np.random.seed(SEED)
 torch.manual_seed(SEED)
 
 DEFAULT_REGISTERED_MODEL_NAME = "dlinear-ett-forecaster"
+# Posición del target (OT) dentro de las features de entrada: la línea base
+# de persistencia lee su última lectura de la ventana.
+TARGET_FEATURE_INDEX = FEATURE_COLUMNS.index(ETT_CONTRACT.target_column)
 DVC_FILE_BY_DATASET = {
     "toy": "data/toy/ETTh1_toy.csv.dvc",
     "raw": "data/raw/ETTh1.csv.dvc",
@@ -211,8 +215,15 @@ class ModelTrainer:
         logger.info(f"Entrenamiento completado. State dict exportado a {model_export_path}")
         return model_export_path, best_val_loss, model
 
-    def evaluate_test_set(self, model: nn.Module, scaler_y_path: str) -> dict[str, float]:
-        """Evalúa el modelo final contra el holdout de test.
+    def evaluate_test_set(
+        self,
+        model: nn.Module,
+        scaler_x_path: str,
+        scaler_y_path: str,
+        target_feature_index: int = TARGET_FEATURE_INDEX,
+    ) -> dict[str, float]:
+        """Evalúa el modelo final contra el holdout de test, junto a una línea
+        base ingenua sobre exactamente las mismas ventanas.
 
         Es la única evaluación de este pipeline que no influyó de ninguna
         forma en qué modelo se entrenó ni en qué checkpoint se eligió: train
@@ -222,25 +233,35 @@ class ModelTrainer:
         honesta de error, no una que el propio proceso de selección ya
         optimizó indirectamente.
 
+        La línea base es la persistencia: repetir la última lectura observada
+        del target durante todo el horizonte. En series con mucha inercia
+        (como la temperatura de aceite) es difícil de batir a pocas horas
+        vista, así que un error bajo en términos absolutos no dice nada por
+        sí solo -- lo que justifica servir un modelo es cuánto mejora a la
+        persistencia (`test_mae_skill`), y quality_gate.py lo exige.
+
         Las métricas se devuelven en la unidad real del target (°C de
         temperatura de aceite), no en la escala normalizada del
-        StandardScaler: un MSE=0.005 en unidades escaladas no le dice nada a
-        un humano ni a un dashboard sobre cuántos grados de error tiene el
-        modelo en la práctica.
+        StandardScaler.
         """
+        scaler_x = joblib.load(scaler_x_path)
         scaler_y = joblib.load(scaler_y_path)
 
         model.eval()
         all_preds: list[np.ndarray] = []
         all_targets: list[np.ndarray] = []
+        all_last_observed: list[np.ndarray] = []
         with torch.no_grad():
             for x_b, y_b in self.test_loader:
-                preds = model(x_b.to(device)).cpu().numpy()
-                all_preds.append(preds)
+                all_preds.append(model(x_b.to(device)).cpu().numpy())
                 all_targets.append(y_b.numpy())
+                # Última lectura del target dentro de la ventana de entrada
+                # (escalada con scaler_X, no con scaler_y).
+                all_last_observed.append(x_b[:, -1, target_feature_index].numpy())
 
         preds = np.concatenate(all_preds, axis=0)
         targets = np.concatenate(all_targets, axis=0)
+        last_observed = np.concatenate(all_last_observed, axis=0)
 
         # scaler_y se ajustó sobre una sola columna (el target); inverse_transform
         # espera (N, 1), así que cada paso del horizonte se desescala por
@@ -251,22 +272,47 @@ class ModelTrainer:
             original_shape
         )
 
-        errors = preds_original - targets_original
-        mse = float(np.mean(errors**2))
-        mae = float(np.mean(np.abs(errors)))
-        rmse = float(np.sqrt(mse))
+        # Persistencia: la última lectura, desescalada con los parámetros de
+        # su propia columna en scaler_X, repetida en los pred_len pasos.
+        last_observed_original = (
+            last_observed * scaler_x.scale_[target_feature_index]
+            + scaler_x.mean_[target_feature_index]
+        )
+        persistence_original = np.repeat(
+            last_observed_original[:, np.newaxis], original_shape[1], axis=1
+        )
 
-        # WAPE (sum|error| / sum|real|), no MAPE: la temperatura de aceite del
-        # split de test de ETTh1 cruza cero, y MAPE divide punto a punto por
-        # el valor real -- en una corrida real dio ~2860%, un número sin
-        # sentido dominado por unas pocas lecturas cercanas a 0 °C. WAPE
-        # agrega antes de dividir, así que un target puntual cercano a cero
-        # no lo hace explotar. El epsilon solo cubre el caso degenerado de
-        # un holdout cuyos targets suman exactamente cero.
-        epsilon = 1e-8
-        wape = float(np.sum(np.abs(errors)) / max(np.sum(np.abs(targets_original)), epsilon) * 100)
+        model_metrics = _forecast_metrics(preds_original, targets_original)
+        persistence_metrics = _forecast_metrics(persistence_original, targets_original)
+        return {
+            "test_mse": model_metrics["mse"],
+            "test_mae": model_metrics["mae"],
+            "test_rmse": model_metrics["rmse"],
+            "test_wape": model_metrics["wape"],
+            "test_mse_persistence": persistence_metrics["mse"],
+            "test_mae_persistence": persistence_metrics["mae"],
+            # Fracción del error de la persistencia que el modelo elimina:
+            # 0 = igual que repetir el último valor, >0 = mejor, <0 = peor.
+            "test_mae_skill": 1.0 - model_metrics["mae"] / persistence_metrics["mae"],
+        }
 
-        return {"test_mse": mse, "test_mae": mae, "test_rmse": rmse, "test_wape": wape}
+
+def _forecast_metrics(predicted: np.ndarray, actual: np.ndarray) -> dict[str, float]:
+    """MSE, MAE, RMSE y WAPE en las unidades del target."""
+    errors = predicted - actual
+    mse = float(np.mean(errors**2))
+    # WAPE (sum|error| / sum|real|), no MAPE: la temperatura de aceite del
+    # split de test de ETTh1 cruza cero, y MAPE divide punto a punto por el
+    # valor real, así que unas pocas lecturas cercanas a 0 °C lo dominan.
+    # WAPE agrega antes de dividir. El epsilon solo cubre el caso degenerado
+    # de un holdout cuyos targets suman exactamente cero.
+    epsilon = 1e-8
+    return {
+        "mse": mse,
+        "mae": float(np.mean(np.abs(errors))),
+        "rmse": float(np.sqrt(mse)),
+        "wape": float(np.sum(np.abs(errors)) / max(np.sum(np.abs(actual)), epsilon) * 100),
+    }
 
 
 if __name__ == "__main__":
@@ -326,23 +372,14 @@ if __name__ == "__main__":
         mlflow.log_metric("final_val_mse", best_val_loss)
 
         test_metrics = trainer.evaluate_test_set(
-            best_model, scaler_y_path=os.path.join(args.artifact_dir, "scaler_y.pkl")
+            best_model,
+            scaler_x_path=os.path.join(args.artifact_dir, "scaler_X.pkl"),
+            scaler_y_path=os.path.join(args.artifact_dir, "scaler_y.pkl"),
         )
-        mlflow.log_metrics(
-            {
-                "final_test_mse": test_metrics["test_mse"],
-                "final_test_mae": test_metrics["test_mae"],
-                "final_test_rmse": test_metrics["test_rmse"],
-                "final_test_wape": test_metrics["test_wape"],
-            }
-        )
-        logger.info(
-            "test_set_evaluated",
-            test_mse=test_metrics["test_mse"],
-            test_mae=test_metrics["test_mae"],
-            test_rmse=test_metrics["test_rmse"],
-            test_wape=test_metrics["test_wape"],
-        )
+        # final_test_mse_persistence es la vara que quality_gate.py exige
+        # superar antes de promover cualquier candidato.
+        mlflow.log_metrics({f"final_{key}": value for key, value in test_metrics.items()})
+        logger.info("test_set_evaluated", **test_metrics)
 
         # Complete the reference profile data_processing.py started (raw
         # per-sensor mean/std, no performance figures yet - it trained no

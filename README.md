@@ -95,11 +95,12 @@ Every major component maps to a specific design decision:
   reference instead of a path on disk that could drift out of sync with
   the code that produced it.
 - **A quality gate stands between "trained" and "serving traffic."**
-  `core_ml/src/quality_gate.py` compares the held-out test MSE of the
-  latest registered version against whatever is currently aliased
-  `production`, and only moves the alias if the candidate is at least as
-  good — promotion is a decision the pipeline enforces, not a side effect
-  of training.
+  `core_ml/src/quality_gate.py` first requires the candidate to beat a
+  naive persistence baseline (repeat the last observed reading) on the same
+  held-out test windows, then compares its test MSE against whatever is
+  currently aliased `production`, and only moves the alias if the candidate
+  is at least as good — promotion is a decision the pipeline enforces, not
+  a side effect of training.
 - **One container image, two entry points.** The image built by CI
   (`Dockerfile`) serves `/predict` through `uvicorn` and runs
   `python -m src.batch_inference` as a Kubernetes CronJob. Both paths load
@@ -112,11 +113,12 @@ Every major component maps to a specific design decision:
   stays alive and reports itself unready (`/health` vs `/ready`) rather
   than crash-looping or serving stale results.
 - **Drift detection is a statistical check, not a subsystem.**
-  `core_ml/src/monitoring/drift_check.py` compares each batch's per-sensor
-  mean against a reference profile captured from training (z-score, |z| > 3
-  flags a feature) and logs the result — no external queue, no persisted
-  history, no automatic action; deciding what to do about a drift signal
-  is a call for a human, not a heuristic.
+  `core_ml/src/monitoring/drift_check.py` flags a sensor when a batch's
+  mean falls outside the p1–p99 band of the rolling weekly means seen
+  during training — i.e. when the model would be extrapolating — and logs
+  the result: no external queue, no persisted history, no automatic
+  action; deciding what to do about a drift signal is a call for a human,
+  not a heuristic.
 - **Infrastructure is provisioned once, applied continuously.**
   `terraform/` owns the VPC, EKS cluster, RDS instance, S3 bucket, ECR
   repository and IAM roles as versioned state; `.gitlab-ci.yml` only
@@ -144,7 +146,7 @@ Every major component maps to a specific design decision:
 │   │   ├── quality_gate.py
 │   │   ├── batch_inference.py
 │   │   └── monitoring/
-│   │       └── drift_check.py      # z-score drift check
+│   │       └── drift_check.py      # drift check (training weekly-mean envelope)
 │   ├── data/                  # DVC-tracked datasets (toy + raw)
 │   └── tests/
 ├── terraform/                 # AWS infrastructure (VPC, EKS, RDS, S3, ECR, IAM)
@@ -247,10 +249,12 @@ Training runs inside the `trainer` container (`core_ml/train.Dockerfile`)
 so that file paths recorded by MLflow are consistent regardless of the
 host OS — a model trained directly on Windows would record artifact paths
 with backslashes that the Linux serving container can't resolve. Every run
-is seeded for reproducibility and logs to MLflow: hyperparameters, metrics
-(`final_test_mse`, `final_test_mae`, ...), the model + its scalers as a
-single versioned artifact, and a reference profile (per-feature mean/std)
-consumed later by the drift check.
+is seeded for reproducibility and logs to MLflow: hyperparameters, test
+metrics for both the model and the persistence baseline
+(`final_test_mse`, `final_test_mae`, `final_test_mse_persistence`,
+`final_test_mae_skill`, ...), the model + its scalers as a single
+versioned artifact, and a reference profile (per-sensor weekly-mean
+envelope) consumed later by the drift check.
 
 The pipeline keeps three splits strictly separated: train fits the
 weights, validation drives the Optuna learning-rate search and early
@@ -259,12 +263,18 @@ the metric the quality gate actually decides on — so that metric reflects
 genuine generalization, not a number the selection process already
 optimized toward.
 
-`core_ml/src/quality_gate.py` is the promotion gate: it compares the
-latest registered model version's `final_test_mse` against whatever is
-currently aliased `production` in the MLflow Model Registry, and only
-moves the `production` alias if the new version is at least as good. If
-there is no `production` version yet, the first candidate becomes the
-baseline. A worse model never gets promoted, and the script exits non-zero
+`core_ml/src/quality_gate.py` is the promotion gate. Its first check is
+against a naive baseline: a candidate trained on real data must have a
+lower `final_test_mse` than `final_test_mse_persistence` — the error of
+simply repeating the last observed oil temperature for the whole horizon,
+measured on the same test windows. Oil temperature has a lot of inertia,
+so persistence is hard to beat a few hours ahead; a model that does not
+beat it does not justify the cost of running it, not even as the first
+version. It then compares the candidate's `final_test_mse` against
+whatever is currently aliased `production` in the MLflow Model Registry,
+and only moves the `production` alias if the new version is at least as
+good. If there is no `production` version yet, the first candidate that
+beats persistence becomes the baseline. A worse model never gets promoted, and the script exits non-zero
 when it rejects a candidate, so a CI pipeline built around it would stop
 before deploying a regression.
 
@@ -273,7 +283,9 @@ share `dataset`, `seq_len` and `pred_len`, otherwise their test MSEs
 measure different things and the candidate is rejected (promote by hand
 if the configuration change is intentional). A `toy` smoke-test model can
 never replace a model trained on real data, while a real model always
-replaces a `toy` baseline.
+replaces a `toy` baseline. The `toy` run is also exempt from the
+persistence rule: its ~100 test windows exist to exercise the plumbing
+end to end, not to measure skill.
 
 ## Batch inference and drift monitoring
 
@@ -292,10 +304,15 @@ replaces a `toy` baseline.
    result.
 
 The drift check itself (`core_ml/src/monitoring/drift_check.py`) is
-intentionally a small, self-contained statistical test: it standardizes
-each sensor's batch mean against the mean/std captured from the training
-data and flags a feature when that z-score exceeds 3. It carries no state
-between runs and takes no action beyond logging — enough to answer "does
+intentionally a small, self-contained statistical test. The readings are
+strongly seasonal and autocorrelated: a batch covers days while the
+training set covers seasons, so testing a batch against the whole training
+distribution would alert on almost every normal week. Instead, the
+reference profile stores, per sensor, the p1–p99 band of the rolling
+weekly means over the training period — the same time scale as a batch —
+and a sensor is flagged when the batch mean falls outside it, meaning the
+model is being asked to extrapolate. It carries no state between runs and
+takes no action beyond logging — enough to answer "does
 this batch still resemble what the model was trained on?", with a human
 deciding what to do about a positive signal. The CronJob's own
 `backoffLimit` and `activeDeadlineSeconds` keep a persistently failing run

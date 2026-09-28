@@ -22,11 +22,13 @@ class _FixedOutputModel(nn.Module):
         return self.fixed_output
 
 
-def _write_trainer_artifacts(tmp_path, scaled_test_targets: torch.Tensor) -> None:
+def _write_trainer_artifacts(
+    tmp_path, scaled_test_targets: torch.Tensor, scaled_test_inputs: torch.Tensor | None = None
+) -> None:
     """Escribe train/val/test_tensors.pt sintéticos: train y val son
     contenido arbitrario (solo necesitan existir con la forma correcta para
     que ModelTrainer.__init__ no falle), test lleva los targets exactos que
-    el test verifica."""
+    el test verifica (y, opcionalmente, las ventanas de entrada exactas)."""
     n_train, n_val, n_test = 6, 4, len(scaled_test_targets)
     seq_len, n_features, pred_len = 3, 2, 1
 
@@ -38,7 +40,16 @@ def _write_trainer_artifacts(tmp_path, scaled_test_targets: torch.Tensor) -> Non
 
     torch.save((_rand_x(n_train), _rand_y(n_train)), tmp_path / "train_tensors.pt")
     torch.save((_rand_x(n_val), _rand_y(n_val)), tmp_path / "val_tensors.pt")
-    torch.save((_rand_x(n_test), scaled_test_targets), tmp_path / "test_tensors.pt")
+    test_inputs = scaled_test_inputs if scaled_test_inputs is not None else _rand_x(n_test)
+    torch.save((test_inputs, scaled_test_targets), tmp_path / "test_tensors.pt")
+
+
+def _dump_scaler_x(tmp_path) -> str:
+    """scaler_X de 2 features, ambas con mean=5 y scale=5 (ajustado sobre
+    [0, 10]); la feature 1 hace de target para la línea base."""
+    path = tmp_path / "scaler_X.pkl"
+    joblib.dump(StandardScaler().fit(np.array([[0.0, 0.0], [10.0, 10.0]])), path)
+    return str(path)
 
 
 def test_evaluate_test_set_computes_metrics_in_original_units(tmp_path):
@@ -49,7 +60,11 @@ def test_evaluate_test_set_computes_metrics_in_original_units(tmp_path):
 
     # Targets escalados -> originales: [0, 5, 10, 15] (via el scaler de arriba).
     scaled_targets = torch.tensor([[-1.0], [0.0], [1.0], [2.0]])
-    _write_trainer_artifacts(tmp_path, scaled_targets)
+    # Última lectura del target (feature 1) en cada ventana: escalada -1 ->
+    # original 0, así que la persistencia predice 0 grados en las 4 ventanas.
+    scaled_inputs = torch.zeros(4, 3, 2)
+    scaled_inputs[:, -1, 1] = -1.0
+    _write_trainer_artifacts(tmp_path, scaled_targets, scaled_inputs)
 
     trainer = ModelTrainer(artifact_dir=str(tmp_path), batch_size=256)
 
@@ -58,7 +73,12 @@ def test_evaluate_test_set_computes_metrics_in_original_units(tmp_path):
     scaled_preds = torch.tensor([[-1.0], [0.0], [1.0], [3.0]])
     model = _FixedOutputModel(scaled_preds)
 
-    metrics = trainer.evaluate_test_set(model, scaler_y_path=str(scaler_y_path))
+    metrics = trainer.evaluate_test_set(
+        model,
+        scaler_x_path=_dump_scaler_x(tmp_path),
+        scaler_y_path=str(scaler_y_path),
+        target_feature_index=1,
+    )
 
     # errors originales: [0, 0, 0, 5] -> mse=6.25, mae=1.25, rmse=2.5
     assert metrics["test_mse"] == pytest_approx(6.25)
@@ -68,6 +88,11 @@ def test_evaluate_test_set_computes_metrics_in_original_units(tmp_path):
     assert metrics["test_rmse"] == pytest_approx(metrics["test_mse"] ** 0.5)
     # wape: sum|errores| / sum|reales| = 5 / (0 + 5 + 10 + 15)
     assert metrics["test_wape"] == pytest_approx(5 / 30 * 100)
+    # persistencia (0 en todas): errores [0, 5, 10, 15] -> mae=7.5, mse=87.5
+    assert metrics["test_mae_persistence"] == pytest_approx(7.5)
+    assert metrics["test_mse_persistence"] == pytest_approx(87.5)
+    # skill: el modelo elimina 1 - 1.25/7.5 del error de la persistencia
+    assert metrics["test_mae_skill"] == pytest_approx(1 - 1.25 / 7.5)
 
 
 def test_evaluate_test_set_wape_is_not_blown_up_by_a_near_zero_target(tmp_path):
@@ -86,7 +111,12 @@ def test_evaluate_test_set_wape_is_not_blown_up_by_a_near_zero_target(tmp_path):
     # target 0. WAPE = 1 / (0 + 10) = 10%, un valor acotado e interpretable.
     model = _FixedOutputModel(torch.tensor([[-0.8], [1.0]]))
 
-    metrics = trainer.evaluate_test_set(model, scaler_y_path=str(scaler_y_path))
+    metrics = trainer.evaluate_test_set(
+        model,
+        scaler_x_path=_dump_scaler_x(tmp_path),
+        scaler_y_path=str(scaler_y_path),
+        target_feature_index=1,
+    )
 
     assert metrics["test_wape"] == pytest_approx(10.0)
 
