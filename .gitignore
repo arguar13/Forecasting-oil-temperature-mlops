@@ -76,6 +76,7 @@ Thumbs.db
 # (.docx). Material privado, no forma parte del repositorio público.
 Guia completa del proyecto*/
 GUIA_EJECUCION_PROYECTO*
+Guia_Completa_Ejecucion_Proyecto*
 *.docx
 ~$*.docx
 
